@@ -1,6 +1,6 @@
 {
   "name": "claude-remote-guard",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Remote approval system for Claude Code CLI using Slack and Supabase",
   "type": "module",
   "main": "dist/index.js",
