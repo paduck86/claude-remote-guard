@@ -11,7 +11,7 @@ interface ClaudeHookCommand {
 }
 
 interface ClaudeHookEntry {
-  matcher: { tools: string[] };
+  matcher?: string; // regex pattern for tool name (e.g., "Bash", "Edit|Write")
   hooks: ClaudeHookCommand[];
 }
 
@@ -25,7 +25,7 @@ interface ClaudeSettings {
 }
 
 const GUARD_HOOK: ClaudeHookEntry = {
-  matcher: { tools: ['Bash'] },
+  matcher: 'Bash',
   hooks: [
     {
       type: 'command',
@@ -86,11 +86,9 @@ function isGuardHook(entry: any): boolean {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isNewFormatGuardHook(entry: any): boolean {
-  // 신버전 포맷인지 확인: matcher가 객체이고 hooks 배열이 있어야 함
+  // 신버전 포맷인지 확인: matcher가 문자열이고 hooks 배열이 있어야 함
   return (
-    entry.matcher &&
-    typeof entry.matcher === 'object' &&
-    Array.isArray(entry.matcher.tools) &&
+    (entry.matcher === undefined || typeof entry.matcher === 'string') &&
     Array.isArray(entry.hooks) &&
     entry.hooks.some((h: ClaudeHookCommand) => isGuardCommand(h.command))
   );
