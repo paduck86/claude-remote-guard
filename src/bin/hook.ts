@@ -150,7 +150,8 @@ function createLocalInputListener(): {
     try {
       fs.accessSync(ttyPath, fs.constants.R_OK);
     } catch {
-      // TTY 없음 (CI/CD 환경 등) - 절대 resolve하지 않음
+      // TTY 없음 - 원격 응답만 대기
+      process.stderr.write('[claude-remote-guard] TTY not available, waiting for remote approval only...\n');
       return;
     }
 

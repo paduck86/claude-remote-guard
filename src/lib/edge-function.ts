@@ -11,7 +11,6 @@ export const SLACK_EDGE_FUNCTION_CODE = `// Supabase Edge Function for Slack Int
 // - SUPABASE_URL: Auto-provided by Supabase
 // - SUPABASE_SERVICE_ROLE_KEY: Auto-provided by Supabase
 
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 interface SlackAction {
@@ -168,7 +167,7 @@ async function verifySlackSignature(
   return result === 0;
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   // Only allow POST from Slack
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
@@ -358,7 +357,6 @@ export const TELEGRAM_EDGE_FUNCTION_CODE = `// Supabase Edge Function for Telegr
 // - SUPABASE_URL: Auto-provided by Supabase
 // - SUPABASE_SERVICE_ROLE_KEY: Auto-provided by Supabase
 
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // Timing-safe string comparison to prevent timing attacks
@@ -508,7 +506,7 @@ interface TelegramUpdate {
   callback_query?: CallbackQuery;
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
   }
@@ -688,7 +686,6 @@ export const WHATSAPP_EDGE_FUNCTION_CODE = `// Supabase Edge Function for WhatsA
 // - SUPABASE_URL: Auto-provided by Supabase
 // - SUPABASE_SERVICE_ROLE_KEY: Auto-provided by Supabase
 
-import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 // Timing-safe string comparison to prevent timing attacks
@@ -845,7 +842,7 @@ async function verifyTwilioSignature(
   return timingSafeEqual(signature, computedSignature);
 }
 
-serve(async (req: Request) => {
+Deno.serve(async (req: Request) => {
   // Only allow POST
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
