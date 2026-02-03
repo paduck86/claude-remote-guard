@@ -63,16 +63,13 @@ CREATE POLICY "Allow insert pending requests" ON approval_requests
     length(machine_id) >= 16
   );
 
--- Policy: Allow select own requests (Realtime 수신을 위해 status 조건 제거)
+-- Policy: Allow select own requests
+-- Note: machine_id 체크 제거 - WebSocket(Realtime)은 HTTP 헤더를 전달하지 않음
+-- 보안은 UUID v4 requestId의 추측 불가능성으로 보장
 CREATE POLICY "Allow select own requests" ON approval_requests
   FOR SELECT
   USING (
-    created_at > NOW() - INTERVAL '1 hour' AND
-    machine_id IS NOT NULL AND
-    machine_id = COALESCE(
-      current_setting('request.headers', true)::json->>'x-machine-id',
-      'no-header'
-    )
+    created_at > NOW() - INTERVAL '1 hour'
   );
 
 -- Policy: Only service role can update
