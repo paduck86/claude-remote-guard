@@ -60,10 +60,28 @@ function writeClaudeSettings(settings: ClaudeSettings): void {
   });
 }
 
-function isGuardHook(entry: ClaudeHookEntry): boolean {
-  return entry.hooks.some(
-    (h) => h.command === 'claude-remote-guard-hook' || h.command.includes('claude-remote-guard-hook')
-  );
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isGuardHook(entry: any): boolean {
+  // 신버전 포맷: entry.hooks 배열
+  if (entry.hooks && Array.isArray(entry.hooks)) {
+    return entry.hooks.some(
+      (h: ClaudeHookCommand) =>
+        h.command === 'claude-remote-guard-hook' ||
+        h.command?.includes('claude-remote-guard-hook') ||
+        h.command === 'claude-guard-hook' ||
+        h.command?.includes('claude-guard-hook')
+    );
+  }
+  // 구버전 포맷: entry.command 직접
+  if (entry.command) {
+    return (
+      entry.command === 'claude-remote-guard-hook' ||
+      entry.command.includes('claude-remote-guard-hook') ||
+      entry.command === 'claude-guard-hook' ||
+      entry.command.includes('claude-guard-hook')
+    );
+  }
+  return false;
 }
 
 export function isHookRegistered(): boolean {
