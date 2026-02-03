@@ -7,7 +7,8 @@
 // - SUPABASE_URL: Auto-provided by Supabase
 // - SUPABASE_SERVICE_ROLE_KEY: Auto-provided by Supabase
 
-import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2';
+// npm: specifier 사용 (Supabase Edge Runtime --no-remote 호환)
+import { createClient, SupabaseClient } from 'npm:@supabase/supabase-js@2';
 
 // Timing-safe string comparison to prevent timing attacks
 function timingSafeEqual(a: string, b: string): boolean {
