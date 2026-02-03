@@ -11,3 +11,6 @@ functions/lib/
 # Local config (contains secrets)
 # Note: Users should NOT commit their config
 # ~/.claude-guard/ is in home directory, not in repo
+
+# Security notes (internal planning docs)
+notes/Security*

@@ -1,4 +1,4 @@
-import type { Messenger, MessengerMessage, MessengerResult } from './types.js';
+import type { Messenger, MessengerMessage, MessengerResult, ConnectionTestResult } from './types.js';
 import { maskSensitiveInfo, truncateCommand, getSeverityEmoji, getSeverityColor } from './base.js';
 
 export interface SlackConfig {
@@ -217,6 +217,32 @@ export class SlackMessenger implements Messenger {
       if (!response.ok) {
         const text = await response.text();
         return { ok: false, error: `Slack API error: ${response.status} ${text}` };
+      }
+
+      return { ok: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { ok: false, error: errorMessage };
+    }
+  }
+
+  // Slack Webhook은 연결 테스트용 별도 API가 없으므로 간단한 메시지 전송으로 테스트
+  async testConnection(): Promise<ConnectionTestResult> {
+    try {
+      // Webhook URL로 간단한 메시지 전송 시도
+      const response = await fetch(this.config.webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          text: '🔗 Claude Guard: Connection test successful',
+        }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return { ok: false, error: `Slack Webhook error: ${response.status} ${text}` };
       }
 
       return { ok: true };

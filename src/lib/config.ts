@@ -35,15 +35,39 @@ const SENSITIVE_FIELDS = [
   'messenger.slack.webhookUrl',
   'messenger.telegram.botToken',
   'messenger.whatsapp.authToken',
+  'machineIdSecret',
 ];
 
 /**
- * 머신 고유 키 생성 (hostname + username + CPU model)
+ * 머신 고유 키 생성 (PBKDF2 + 다중 엔트로피 소스)
  * 해당 머신에서만 복호화 가능
  */
 function getMachineKey(): Buffer {
-  const raw = `${os.hostname()}:${os.userInfo().username}:${os.cpus()[0]?.model || 'unknown'}`;
-  return crypto.createHash('sha256').update(raw).digest();
+  const components = [
+    os.hostname(),
+    os.userInfo().username,
+    os.cpus()[0]?.model || '',
+    os.platform(),
+    os.arch(),
+    os.totalmem().toString(),
+  ];
+
+  // Linux/macOS에서 machine-id 추가
+  try {
+    if (fs.existsSync('/etc/machine-id')) {
+      components.push(fs.readFileSync('/etc/machine-id', 'utf8').trim());
+    } else if (fs.existsSync('/var/lib/dbus/machine-id')) {
+      components.push(fs.readFileSync('/var/lib/dbus/machine-id', 'utf8').trim());
+    }
+  } catch {
+    // machine-id 읽기 실패는 무시
+  }
+
+  const raw = components.join(':');
+
+  // PBKDF2로 키 파생 (100,000 iterations)
+  const salt = 'claude-remote-guard-v1'; // 고정 솔트 (버전 관리용)
+  return crypto.pbkdf2Sync(raw, salt, 100000, 32, 'sha256');
 }
 
 /**
@@ -61,6 +85,14 @@ function encryptSecret(plaintext: string): string {
   encrypted += cipher.final('base64');
   const authTag = cipher.getAuthTag();
   return `ENC:${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted}`;
+}
+
+/**
+ * 서명된 machine_id 생성용 비밀 키 생성
+ * 32바이트 랜덤 hex 문자열 반환
+ */
+function generateMachineIdSecret(): string {
+  return crypto.randomBytes(32).toString('hex');
 }
 
 /**
@@ -82,9 +114,10 @@ function decryptSecret(encrypted: string): string {
     decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
     return decipher.update(ciphertext, 'base64', 'utf8') + decipher.final('utf8');
   } catch {
-    // 복호화 실패 시 원본 반환 (다른 머신에서 생성된 경우 등)
-    console.warn('[claude-remote-guard] 시크릿 복호화 실패: 다른 머신에서 암호화되었거나 손상됨');
-    return encrypted;
+    // 복호화 실패 시 예외 발생 (보안)
+    // 다른 머신에서 생성된 config는 사용 불가
+    console.error('[claude-remote-guard] 오류: 시크릿 복호화 실패. 다른 머신에서 생성된 설정 파일입니다.');
+    throw new Error('시크릿 복호화 실패. claude-remote-guard init 으로 재설정하세요.');
   }
 }
 
@@ -168,6 +201,7 @@ export interface Config {
   messenger: MessengerConfig;
   supabase: SupabaseConfig;
   rules: RulesConfig;
+  machineIdSecret?: string; // 서명된 machine_id 생성용 비밀 키
 }
 
 // Legacy config for backward compatibility
@@ -179,6 +213,50 @@ export interface LegacyConfig {
 
 const CONFIG_DIR = path.join(os.homedir(), '.claude-remote-guard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
+// ============================================================
+// Phase 3.3: Symlink Race Condition 방지
+// ============================================================
+
+/**
+ * 주어진 경로가 심볼릭 링크인지 확인
+ * lstat을 사용하여 링크 자체의 정보를 가져옴 (따라가지 않음)
+ */
+function isSymlink(filePath: string): boolean {
+  try {
+    const stats = fs.lstatSync(filePath);
+    return stats.isSymbolicLink();
+  } catch {
+    return false; // 파일이 없으면 false
+  }
+}
+
+/**
+ * 디렉토리 보안 검사 및 생성
+ * - 심볼릭 링크 여부 검사
+ * - 권한이 0700이 아니면 경고 후 변경
+ */
+function ensureSecureDirectory(dirPath: string): void {
+  // 디렉토리가 심볼릭 링크인지 확인
+  if (isSymlink(dirPath)) {
+    throw new Error(`보안 오류: ${dirPath}가 심볼릭 링크입니다. 직접 디렉토리를 사용하세요.`);
+  }
+
+  // 디렉토리 생성
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { mode: 0o700, recursive: true });
+  }
+
+  // 디렉토리 권한 확인 (소유자만 접근 가능)
+  const stats = fs.statSync(dirPath);
+  const mode = stats.mode & 0o777;
+  if (mode !== 0o700) {
+    console.warn(
+      `[claude-remote-guard] 경고: ${dirPath} 권한이 ${mode.toString(8)}입니다. 0700으로 변경합니다.`
+    );
+    fs.chmodSync(dirPath, 0o700);
+  }
+}
 
 export function getConfigDir(): string {
   return CONFIG_DIR;
@@ -219,6 +297,13 @@ export function loadConfig(): Config | null {
     return null;
   }
 
+  // Phase 3.3: 심볼릭 링크 검사 (Symlink Race Condition 방지)
+  if (isSymlink(CONFIG_FILE)) {
+    console.error(`[claude-remote-guard] 보안 오류: ${CONFIG_FILE}가 심볼릭 링크입니다.`);
+    console.error('[claude-remote-guard] 해결: 심볼릭 링크를 삭제하고 claude-remote-guard init 으로 재설정하세요.');
+    return null;
+  }
+
   try {
     const content = fs.readFileSync(CONFIG_FILE, 'utf-8');
     const rawConfig = JSON.parse(content);
@@ -239,10 +324,11 @@ export function loadConfig(): Config | null {
       delete configWithoutHmac._hmac;
       const computedHmac = computeConfigHmac(configWithoutHmac as Config);
       if (storedHmac !== computedHmac) {
-        console.warn(
-          '[claude-remote-guard] 경고: 설정 파일 무결성 검증 실패. ' +
-            '파일이 외부에서 수정되었거나 다른 머신에서 생성되었을 수 있습니다.'
+        console.error(
+          '[claude-remote-guard] 오류: 설정 파일 무결성 검증 실패. 설정이 변조되었을 수 있습니다.'
         );
+        console.error('[claude-remote-guard] 해결: claude-remote-guard init 으로 재설정하세요.');
+        return null; // 설정 로드 거부
       }
     }
 
@@ -256,10 +342,38 @@ export function loadConfig(): Config | null {
       }
     }
 
-    // Phase 2.1: 환경변수로 오버라이드
+    // Phase 2.1: 환경변수로 오버라이드 (보안 설정 완화 방지)
+    const SECURITY_SETTINGS = ['rules.defaultAction', 'rules.timeoutSeconds'];
+
     for (const [envVar, configPath] of Object.entries(ENV_MAPPING)) {
       const envValue = process.env[envVar];
       if (envValue !== undefined) {
+        // 보안 설정 완화 방지
+        if (SECURITY_SETTINGS.includes(configPath)) {
+          const currentValue = getNestedValue(config as unknown as Record<string, unknown>, configPath);
+
+          // defaultAction: allow로 완화 불가
+          if (configPath === 'rules.defaultAction' && envValue === 'allow' && currentValue === 'deny') {
+            console.warn(
+              `[claude-remote-guard] 경고: 환경변수로 defaultAction을 'allow'로 완화할 수 없습니다.`
+            );
+            continue;
+          }
+
+          // timeoutSeconds: 60초 미만으로 완화 불가
+          if (configPath === 'rules.timeoutSeconds') {
+            const numValue = parseInt(envValue, 10);
+            if (isNaN(numValue) || numValue < 60) {
+              console.warn(
+                `[claude-remote-guard] 경고: 환경변수로 timeoutSeconds를 60초 미만으로 설정할 수 없습니다.`
+              );
+              continue;
+            }
+            setNestedValue(config as unknown as Record<string, unknown>, configPath, numValue);
+            continue;
+          }
+        }
+
         // timeoutSeconds는 숫자로 변환
         if (configPath === 'rules.timeoutSeconds') {
           const parsed = parseInt(envValue, 10);
@@ -279,8 +393,19 @@ export function loadConfig(): Config | null {
 }
 
 export function saveConfig(config: Config): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  // Phase 3.3: 디렉토리 보안 검사 (Symlink Race Condition 방지)
+  ensureSecureDirectory(CONFIG_DIR);
+
+  // Phase 3.3: config.json이 심볼릭 링크인지 확인
+  if (isSymlink(CONFIG_FILE)) {
+    throw new Error(
+      `보안 오류: ${CONFIG_FILE}가 심볼릭 링크입니다. 파일을 삭제하고 다시 시도하세요.`
+    );
+  }
+
+  // machineIdSecret이 없으면 자동 생성
+  if (!config.machineIdSecret) {
+    config.machineIdSecret = generateMachineIdSecret();
   }
 
   // Phase 3.1: 저장 전 민감한 필드 암호화

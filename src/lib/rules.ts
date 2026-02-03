@@ -5,12 +5,51 @@ export type Severity = 'low' | 'medium' | 'high' | 'critical';
 /** 최대 허용 패턴 길이 */
 const MAX_PATTERN_LENGTH = 200;
 
+/** 너무 광범위한 whitelist 패턴 목록 */
+const DANGEROUS_WHITELIST_PATTERNS = [
+  /^\.\*$/,           // .* (모든 것 허용)
+  /^\.\+$/,           // .+ (모든 것 허용)
+  /^\[\^.\]\*$/,      // [^x]* 같은 부정 패턴
+  /^\(\?:.\)\*$/,     // (?:.)*
+  /^.\{0,\}$/,        // .{0,} (모든 것)
+];
+
+/**
+ * Whitelist 패턴이 너무 광범위한지 검사합니다.
+ * @param pattern 검사할 정규식 패턴 문자열
+ * @returns 너무 광범위하면 true
+ */
+function isPatternTooPermissive(pattern: string): boolean {
+  // 정규화
+  const normalized = pattern.trim();
+
+  // 너무 짧은 패턴 (2자 이하)
+  if (normalized.length <= 2) {
+    return true;
+  }
+
+  // 위험한 패턴 체크
+  for (const dangerous of DANGEROUS_WHITELIST_PATTERNS) {
+    if (dangerous.test(normalized)) {
+      return true;
+    }
+  }
+
+  // 시작이 .* 이면 너무 광범위
+  if (normalized.startsWith('.*') || normalized.startsWith('.+')) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * ReDoS 공격을 방지하기 위해 사용자 정규식 패턴의 안전성을 검증합니다.
  * @param pattern 사용자가 제공한 정규식 패턴 문자열
+ * @param isWhitelist whitelist 패턴인 경우 true (광범위한 패턴 거부)
  * @returns 안전한 경우 RegExp 객체, 안전하지 않으면 null
  */
-function createSafeRegex(pattern: string): RegExp | null {
+function createSafeRegex(pattern: string, isWhitelist: boolean = false): RegExp | null {
   // 패턴 길이 제한
   if (pattern.length > MAX_PATTERN_LENGTH) {
     console.warn(`[rules] 정규식 패턴이 너무 깁니다 (${pattern.length} > ${MAX_PATTERN_LENGTH}): ${pattern.slice(0, 50)}...`);
@@ -20,6 +59,12 @@ function createSafeRegex(pattern: string): RegExp | null {
   // ReDoS 취약점 검사
   if (!safeRegex(pattern)) {
     console.warn(`[rules] 안전하지 않은 정규식 패턴이 감지되었습니다: ${pattern.slice(0, 50)}${pattern.length > 50 ? '...' : ''}`);
+    return null;
+  }
+
+  // Whitelist인 경우 광범위한 패턴 거부
+  if (isWhitelist && isPatternTooPermissive(pattern)) {
+    console.warn(`[rules] 너무 광범위한 whitelist 패턴 거부: ${pattern}`);
     return null;
   }
 
@@ -139,7 +184,7 @@ export function analyzeCommand(
   // Check user whitelist
   if (whitelist) {
     for (const pattern of whitelist) {
-      const regex = createSafeRegex(pattern);
+      const regex = createSafeRegex(pattern, true); // isWhitelist = true
       if (regex && regex.test(trimmedCommand)) {
         return { isDangerous: false, severity: 'low', reason: 'Whitelisted command' };
       }

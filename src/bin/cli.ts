@@ -588,6 +588,11 @@ async function collectSecretsForMessenger(
 ): Promise<Record<string, string>> {
   const secrets: Record<string, string> = {};
 
+  // machineIdSecret이 있으면 추가 (모든 메신저 공통)
+  if (config.machineIdSecret) {
+    secrets['MACHINE_ID_SECRET'] = config.machineIdSecret;
+  }
+
   if (messengerType === 'slack') {
     const { signingSecret } = await inquirer.prompt([
       {

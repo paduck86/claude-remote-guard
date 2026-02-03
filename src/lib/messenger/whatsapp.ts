@@ -1,4 +1,4 @@
-import type { Messenger, MessengerMessage, MessengerResult } from './types.js';
+import type { Messenger, MessengerMessage, MessengerResult, ConnectionTestResult } from './types.js';
 import { maskSensitiveInfo, truncateCommand, getSeverityEmoji } from './base.js';
 
 export interface WhatsAppConfig {
@@ -122,6 +122,43 @@ export class WhatsAppMessenger implements Messenger {
       }
 
       return { ok: true };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { ok: false, error: errorMessage };
+    }
+  }
+
+  // Twilio Account 정보 조회로 연결 테스트
+  async testConnection(): Promise<ConnectionTestResult> {
+    try {
+      const url = `https://api.twilio.com/2010-04-01/Accounts/${this.config.accountSid}.json`;
+      const auth = Buffer.from(`${this.config.accountSid}:${this.config.authToken}`).toString('base64');
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Basic ${auth}`,
+        },
+      });
+
+      const result = await response.json() as {
+        sid?: string;
+        friendly_name?: string;
+        status?: string;
+        message?: string;
+        code?: number;
+      };
+
+      if (!response.ok) {
+        return { ok: false, error: `Twilio API error: ${result.message || 'Invalid credentials'}` };
+      }
+
+      return {
+        ok: true,
+        info: {
+          accountName: result.friendly_name || result.sid,
+        },
+      };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       return { ok: false, error: errorMessage };

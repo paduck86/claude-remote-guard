@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { execSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -17,11 +18,68 @@ import {
 
 /**
  * 머신 고유 식별자 생성
- * hostname + username 해시로 생성하여 동일 머신에서 일관된 ID 보장
+ * 다양한 엔트로피 소스를 조합하여 RLS 우회를 방지
+ * - hostname, username, platform, arch: 기본 시스템 정보
+ * - machine-id: Linux/macOS 시스템 고유 ID
+ * - IOPlatformUUID: macOS 하드웨어 고유 ID
+ * - homedir: 사용자별 고유 경로
  */
 function getMachineId(): string {
-  const raw = `${os.hostname()}:${os.userInfo().username}`;
+  const components: string[] = [
+    os.hostname(),
+    os.userInfo().username,
+    os.platform(),
+    os.arch(),
+  ];
+
+  // Linux/macOS machine-id 추가 (시스템 고유 식별자)
+  try {
+    if (fs.existsSync('/etc/machine-id')) {
+      components.push(fs.readFileSync('/etc/machine-id', 'utf8').trim());
+    } else if (fs.existsSync('/var/lib/dbus/machine-id')) {
+      components.push(fs.readFileSync('/var/lib/dbus/machine-id', 'utf8').trim());
+    }
+  } catch {
+    // 에러 시 무시하고 다른 소스 사용
+  }
+
+  // macOS: IOPlatformUUID (하드웨어 고유 ID)
+  try {
+    if (os.platform() === 'darwin') {
+      const uuid = execSync(
+        'ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID',
+        { encoding: 'utf8' }
+      );
+      const match = uuid.match(/"IOPlatformUUID" = "([^"]+)"/);
+      if (match) {
+        components.push(match[1]);
+      }
+    }
+  } catch {
+    // 에러 시 무시하고 다른 소스 사용
+  }
+
+  // 홈 디렉토리 경로 추가 (사용자별 고유)
+  components.push(os.homedir());
+
+  const raw = components.join(':');
   return crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
+}
+
+/**
+ * 서명된 machine_id 생성
+ * HMAC 서명으로 machine_id 위조 방지
+ * 형식: machineId:timestamp:signature
+ */
+function getSignedMachineId(machineId: string, secret: string): string {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const payload = `${machineId}:${timestamp}`;
+  const signature = crypto
+    .createHmac('sha256', secret)
+    .update(payload)
+    .digest('hex')
+    .substring(0, 16);
+  return `${payload}:${signature}`;
 }
 
 interface HookInput {
@@ -216,8 +274,13 @@ async function main(): Promise<void> {
       // Generate machine identifier for RLS
       const machineId = getMachineId();
 
+      // machineIdSecret이 있으면 서명된 machineId 사용 (위조 방지)
+      const signedMachineId = config.machineIdSecret
+        ? getSignedMachineId(machineId, config.machineIdSecret)
+        : machineId;
+
       // Initialize Supabase with machine_id header
-      initializeSupabase(config, machineId);
+      initializeSupabase(config, signedMachineId);
 
       // Create request in Supabase with machine identifier
       await createRequest(requestId, {
@@ -225,7 +288,7 @@ async function main(): Promise<void> {
         dangerReason: analysis.reason,
         severity: analysis.severity,
         cwd,
-        machineId,
+        machineId: signedMachineId,
       });
 
       // Send notification via configured messenger

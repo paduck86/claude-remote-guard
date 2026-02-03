@@ -1,7 +1,10 @@
 -- Create approval_requests table with proper security
 -- Run this in your Supabase SQL editor
 
--- Create the table
+-- ==========================================
+-- 1. approval_requests 테이블
+-- ==========================================
+
 CREATE TABLE IF NOT EXISTS approval_requests (
   id UUID PRIMARY KEY,
   command TEXT NOT NULL,
@@ -12,9 +15,7 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   resolved_at TIMESTAMPTZ,
   resolved_by TEXT,
-  -- Add machine identifier for multi-user scenarios
-  machine_id TEXT,
-  -- Add index for faster queries
+  machine_id TEXT NOT NULL,
   CONSTRAINT valid_resolution CHECK (
     (status = 'pending' AND resolved_at IS NULL AND resolved_by IS NULL) OR
     (status != 'pending' AND resolved_at IS NOT NULL)
@@ -29,6 +30,11 @@ ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS machine_id TEXT;
 ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
 ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_by TEXT;
 
+-- 레거시 데이터 정리: NULL인 machine_id에 고유 값 설정
+UPDATE approval_requests
+SET machine_id = 'legacy-' || id::text
+WHERE machine_id IS NULL;
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(status);
 CREATE INDEX IF NOT EXISTS idx_approval_requests_created_at ON approval_requests(created_at);
@@ -37,33 +43,40 @@ CREATE INDEX IF NOT EXISTS idx_approval_requests_machine_id ON approval_requests
 -- Enable Row Level Security
 ALTER TABLE approval_requests ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if any
+-- Drop existing policies
 DROP POLICY IF EXISTS "Allow insert for authenticated and anon" ON approval_requests;
+DROP POLICY IF EXISTS "Allow insert pending requests" ON approval_requests;
 DROP POLICY IF EXISTS "Allow select own requests" ON approval_requests;
+DROP POLICY IF EXISTS "Allow select pending requests" ON approval_requests;
 DROP POLICY IF EXISTS "Allow update via service role only" ON approval_requests;
 DROP POLICY IF EXISTS "Allow delete old requests" ON approval_requests;
 
--- Policy: Allow insert (CLI creates requests)
--- In production, consider adding machine_id validation
-CREATE POLICY "Allow insert for authenticated and anon" ON approval_requests
+-- Policy: Allow insert with machine_id required
+CREATE POLICY "Allow insert pending requests" ON approval_requests
   FOR INSERT
   WITH CHECK (
     status = 'pending' AND
     resolved_at IS NULL AND
-    resolved_by IS NULL
+    resolved_by IS NULL AND
+    machine_id IS NOT NULL AND
+    machine_id != '' AND
+    length(machine_id) >= 16
   );
 
--- Policy: Allow select own pending requests only (for real-time subscription)
--- Clients can only see their own pending requests
+-- Policy: Allow select own pending requests only (machine_id 필수)
 CREATE POLICY "Allow select pending requests" ON approval_requests
   FOR SELECT
   USING (
     status = 'pending' AND
-    created_at > NOW() - INTERVAL '1 hour'
+    created_at > NOW() - INTERVAL '1 hour' AND
+    machine_id IS NOT NULL AND
+    machine_id = COALESCE(
+      current_setting('request.headers', true)::json->>'x-machine-id',
+      'no-header'
+    )
   );
 
--- Policy: Only service role can update (Edge Function uses service role key)
--- This prevents unauthorized approval/rejection via anon key
+-- Policy: Only service role can update
 CREATE POLICY "Allow update via service role only" ON approval_requests
   FOR UPDATE
   USING (auth.role() = 'service_role');
@@ -73,7 +86,7 @@ CREATE POLICY "Allow delete old requests" ON approval_requests
   FOR DELETE
   USING (created_at < NOW() - INTERVAL '24 hours');
 
--- Enable realtime for the table (ignore if already added)
+-- Enable realtime
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -84,7 +97,7 @@ BEGIN
   END IF;
 END $$;
 
--- Create a function to auto-cleanup old requests (optional)
+-- Cleanup function for old approval requests
 CREATE OR REPLACE FUNCTION cleanup_old_approval_requests()
 RETURNS void
 LANGUAGE plpgsql
@@ -96,12 +109,51 @@ BEGIN
 END;
 $$;
 
--- Grant necessary permissions
+-- Grant permissions
 GRANT SELECT, INSERT, DELETE ON approval_requests TO anon;
 GRANT SELECT, INSERT, UPDATE, DELETE ON approval_requests TO authenticated;
 GRANT ALL ON approval_requests TO service_role;
 
--- Comment for documentation
 COMMENT ON TABLE approval_requests IS 'Stores pending command approval requests from Claude Guard CLI';
-COMMENT ON COLUMN approval_requests.command IS 'The command that requires approval (sensitive info masked)';
-COMMENT ON COLUMN approval_requests.machine_id IS 'Optional identifier to scope requests per machine';
+COMMENT ON COLUMN approval_requests.machine_id IS 'Required identifier to scope requests per machine (32-char hex)';
+
+-- ==========================================
+-- 2. rate_limits 테이블 (서버리스 Rate Limiting)
+-- ==========================================
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  id SERIAL PRIMARY KEY,
+  identifier TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Index for fast queries
+CREATE INDEX IF NOT EXISTS idx_rate_limits_identifier_created ON rate_limits(identifier, created_at);
+
+-- Enable RLS
+ALTER TABLE rate_limits ENABLE ROW LEVEL SECURITY;
+
+-- Drop existing policy if any
+DROP POLICY IF EXISTS "service_role_only" ON rate_limits;
+
+-- Policy: service_role only (Edge Functions use service_role_key)
+CREATE POLICY "service_role_only" ON rate_limits
+  FOR ALL USING (auth.role() = 'service_role');
+
+-- Grant permissions
+GRANT ALL ON rate_limits TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE rate_limits_id_seq TO service_role;
+
+-- Cleanup function for old rate limit records
+CREATE OR REPLACE FUNCTION cleanup_old_rate_limits()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  DELETE FROM rate_limits
+  WHERE created_at < NOW() - INTERVAL '1 hour';
+END;
+$$;
+
+COMMENT ON TABLE rate_limits IS 'Rate limiting records for Edge Functions (serverless-compatible)';
