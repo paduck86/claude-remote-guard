@@ -3,6 +3,10 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const packageJson = require('../../package.json');
 import {
   loadConfig,
   saveConfig,
@@ -41,7 +45,7 @@ const program = new Command();
 program
   .name('claude-remote-guard')
   .description('Claude Guard - Remote approval system for Claude Code CLI')
-  .version('1.0.0');
+  .version(packageJson.version);
 
 program
   .command('init')
