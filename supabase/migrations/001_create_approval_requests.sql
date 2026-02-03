@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   )
 );
 
+-- If table already exists, add missing columns
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS danger_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'medium';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS cwd TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS machine_id TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_by TEXT;
+
 -- Create indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(status);
 CREATE INDEX IF NOT EXISTS idx_approval_requests_created_at ON approval_requests(created_at);
@@ -65,8 +73,16 @@ CREATE POLICY "Allow delete old requests" ON approval_requests
   FOR DELETE
   USING (created_at < NOW() - INTERVAL '24 hours');
 
--- Enable realtime for the table
-ALTER PUBLICATION supabase_realtime ADD TABLE approval_requests;
+-- Enable realtime for the table (ignore if already added)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = 'supabase_realtime' AND tablename = 'approval_requests'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE approval_requests;
+  END IF;
+END $$;
 
 -- Create a function to auto-cleanup old requests (optional)
 CREATE OR REPLACE FUNCTION cleanup_old_approval_requests()

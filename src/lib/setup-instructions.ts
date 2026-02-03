@@ -14,6 +14,14 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   machine_id TEXT
 );
 
+-- If table already exists, add missing columns
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS danger_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS severity TEXT NOT NULL DEFAULT 'medium';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS cwd TEXT NOT NULL DEFAULT '';
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS machine_id TEXT;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS resolved_by TEXT;
+
 -- Enable Row Level Security (CRITICAL)
 ALTER TABLE approval_requests ENABLE ROW LEVEL SECURITY;
 
