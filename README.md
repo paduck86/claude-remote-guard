@@ -2,21 +2,204 @@
 
 Remote approval system for Claude Code CLI. Get Slack notifications for dangerous commands and approve or reject them in real-time.
 
-## Architecture
+## Quick Start
+
+Get started in 5 minutes:
+
+```bash
+# 1. Install
+npm install -g claude-remote-guard
+
+# 2. Run interactive setup
+guard init
+```
+
+The `guard init` command will:
+- Ask for your Slack Webhook URL and Supabase credentials
+- Generate the SQL schema to run in Supabase
+- Create the Edge Function files to deploy
+
+Follow the on-screen instructions to complete setup.
+
+## Detailed Setup Guide
+
+### Step 1: Create a Slack App
+
+1. Go to [Slack API](https://api.slack.com/apps) and create a new app
+2. Enable **Incoming Webhooks**:
+   - Go to "Incoming Webhooks" in the sidebar
+   - Toggle "Activate Incoming Webhooks" to On
+   - Click "Add New Webhook to Workspace"
+   - Select a channel and authorize
+   - Copy the Webhook URL (you'll need this for `guard init`)
+3. **Note**: We'll configure Interactivity later (Step 6) after deploying the Edge Function
+
+### Step 2: Create Supabase Project
+
+1. Create a project at [Supabase Dashboard](https://supabase.com/dashboard)
+2. Go to **Project Settings > API** and copy:
+   - Project URL (e.g., `https://xxxx.supabase.co`)
+   - Anon/public key
+
+### Step 3: Run guard init
+
+```bash
+guard init
+```
+
+The interactive setup will ask for:
+- Slack Webhook URL (from Step 1)
+- Supabase Project URL (from Step 2)
+- Supabase Anon Key (from Step 2)
+
+After completion, it will output:
+- SQL schema to run in Supabase
+- Edge Function files in `~/.claude-guard/supabase/functions/slack-callback/`
+
+### Step 4: Run SQL in Supabase
+
+1. Copy the SQL schema output from `guard init`
+2. Go to your Supabase project's **SQL Editor**
+3. Paste and run the SQL
+
+The SQL creates the `approval_requests` table with:
+- Realtime subscriptions enabled
+- Row Level Security (RLS) policies
+- Proper indexes for performance
+
+### Step 5: Deploy Edge Function
+
+```bash
+# Install Supabase CLI (if not installed)
+npm install -g supabase
+
+# Login to Supabase
+supabase login
+
+# Link to your project
+supabase link --project-ref <your-project-ref>
+
+# Deploy the Edge Function
+supabase functions deploy slack-callback --project-ref <your-project-ref>
+```
+
+Your Edge Function URL will be:
+`https://<project-ref>.supabase.co/functions/v1/slack-callback`
+
+### Step 6: Configure Slack Interactivity
+
+Now that you have the Edge Function URL:
+
+1. Go back to your [Slack App settings](https://api.slack.com/apps)
+2. Navigate to **Interactivity & Shortcuts**
+3. Toggle "Interactivity" to On
+4. Set the **Request URL** to your Edge Function URL:
+   `https://<project-ref>.supabase.co/functions/v1/slack-callback`
+5. Click "Save Changes"
+
+### Verify Setup
+
+```bash
+# Check configuration and connections
+guard status
+
+# Send a test notification
+guard test
+```
+
+## How It Works
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   Claude Code   │────▶│   hook.ts        │────▶│  Slack API      │
 │   (PreToolUse)  │     │  (CLI execution) │     │  (notification) │
 └─────────────────┘     └────────┬─────────┘     └────────┬────────┘
-                                 │                        │
-                                 │ Realtime subscription  │ Button click
-                                 ▼                        ▼
-                        ┌──────────────────┐     ┌─────────────────┐
-                        │  Supabase DB     │◀────│  Edge Function  │
-                        │  (PostgreSQL)    │     │  (Deno-based)   │
-                        └──────────────────┘     └─────────────────┘
+                                │                        │
+                                │ Realtime subscription  │ Button click
+                                ▼                        ▼
+                       ┌──────────────────┐     ┌─────────────────┐
+                       │  Supabase DB     │◀────│  Edge Function  │
+                       │  (PostgreSQL)    │     │  (Deno-based)   │
+                       └──────────────────┘     └─────────────────┘
 ```
+
+1. When Claude Code tries to execute a Bash command, the hook intercepts it
+2. The command is analyzed for dangerous patterns
+3. If dangerous, a Slack notification is sent with Approve/Reject buttons
+4. The approval request is stored in Supabase with `pending` status
+5. You click Approve or Reject in Slack
+6. The Edge Function updates the status in Supabase
+7. The hook receives the update via Realtime subscription
+8. The command is allowed or blocked accordingly
+
+## Commands
+
+```bash
+guard init       # Initialize Claude Guard (interactive setup)
+guard status     # Check status and test connections
+guard test       # Send a test notification
+guard uninstall  # Remove Claude Guard
+```
+
+## Configuration
+
+Configuration is stored in `~/.claude-guard/config.json`:
+
+```json
+{
+  "slack": {
+    "webhookUrl": "https://hooks.slack.com/services/..."
+  },
+  "supabase": {
+    "url": "https://xxxx.supabase.co",
+    "anonKey": "eyJhbGciOiJIUzI1NiIs..."
+  },
+  "rules": {
+    "timeoutSeconds": 300,
+    "defaultAction": "deny",
+    "customPatterns": [],
+    "whitelist": []
+  }
+}
+```
+
+### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `timeoutSeconds` | 300 | How long to wait for approval |
+| `defaultAction` | "deny" | Action on timeout: `allow` or `deny` |
+| `customPatterns` | [] | Additional dangerous patterns to detect |
+| `whitelist` | [] | Regex patterns for commands to always allow |
+
+### Custom Pattern Example
+
+```json
+{
+  "rules": {
+    "customPatterns": [
+      {
+        "pattern": "my-deploy-cmd",
+        "severity": "high",
+        "reason": "Custom deployment command"
+      }
+    ]
+  }
+}
+```
+
+## Dangerous Patterns
+
+Built-in patterns that trigger approval requests:
+
+| Pattern | Severity | Reason |
+|---------|----------|--------|
+| `rm -rf` | high | Recursive force file deletion |
+| `git push --force` | critical | Force push can overwrite remote history |
+| `git reset --hard` | high | Discards uncommitted changes |
+| `npm publish` | high | Publishing package to npm |
+| `sudo` | high | Elevated privileges |
+| `curl \| bash` | critical | Remote script execution |
 
 ## Features
 
@@ -28,163 +211,9 @@ Remote approval system for Claude Code CLI. Get Slack notifications for dangerou
 
 ## Prerequisites
 
-1. **Slack App** with Incoming Webhooks enabled
-2. **Supabase Project** (free tier works)
-3. **Node.js** 18 or higher
-
-## Installation
-
-```bash
-npm install -g claude-remote-guard
-```
-
-## Setup
-
-### 1. Create a Slack App
-
-1. Go to [Slack API](https://api.slack.com/apps) and create a new app
-2. Enable **Incoming Webhooks** and create a webhook URL
-3. Enable **Interactivity** and set the Request URL to your Edge Function URL (see step 3)
-4. Install the app to your workspace
-
-### 2. Set up Supabase
-
-1. Create a project at [Supabase Dashboard](https://supabase.com/dashboard)
-2. Go to **SQL Editor** and run the following schema:
-
-```sql
-CREATE TABLE approval_requests (
-  id UUID PRIMARY KEY,
-  command TEXT NOT NULL,
-  danger_reason TEXT NOT NULL,
-  severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
-  cwd TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'timeout')),
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  resolved_at TIMESTAMPTZ,
-  resolved_by TEXT
-);
-
--- Enable Realtime
-ALTER PUBLICATION supabase_realtime ADD TABLE approval_requests;
-
--- Enable RLS (Row Level Security)
-ALTER TABLE approval_requests ENABLE ROW LEVEL SECURITY;
-
--- Allow anonymous users to insert and select
-CREATE POLICY "Allow anonymous insert" ON approval_requests
-  FOR INSERT TO anon WITH CHECK (true);
-
-CREATE POLICY "Allow anonymous select" ON approval_requests
-  FOR SELECT TO anon USING (true);
-```
-
-3. Go to **Project Settings > API** and copy:
-   - Project URL (e.g., `https://xxxx.supabase.co`)
-   - Anon/public key
-
-### 3. Deploy Edge Function
-
-```bash
-# Install Supabase CLI
-npm install -g supabase
-
-# Login and link project
-supabase login
-supabase link --project-ref <your-project-ref>
-
-# Deploy the function
-supabase functions deploy slack-callback
-```
-
-Update your Slack App's **Interactivity Request URL** to:
-`https://<project-ref>.supabase.co/functions/v1/slack-callback`
-
-### 4. Initialize Claude Guard
-
-```bash
-guard init
-```
-
-Follow the prompts to enter:
-- Slack Webhook URL
-- Supabase Project URL
-- Supabase Anon Key
-
-## Usage
-
-### Commands
-
-```bash
-# Initialize Claude Guard
-guard init
-
-# Check status and test connections
-guard status
-
-# Send a test notification
-guard test
-
-# Remove Claude Guard
-guard uninstall
-```
-
-### How It Works
-
-1. When Claude Code tries to execute a Bash command, the hook intercepts it
-2. The command is analyzed for dangerous patterns
-3. If dangerous, a Slack notification is sent
-4. You click Approve or Reject in Slack
-5. The command is allowed or blocked accordingly
-
-### Dangerous Commands Detected
-
-| Pattern | Severity | Reason |
-|---------|----------|--------|
-| `rm -rf` | high | Recursive force file deletion |
-| `git push --force` | critical | Force push can overwrite remote history |
-| `git reset --hard` | high | Discards uncommitted changes |
-| `npm publish` | high | Publishing package to npm |
-| `sudo` | high | Elevated privileges |
-| `curl \| bash` | critical | Remote script execution |
-
-### Configuration
-
-Configuration is stored in `~/.claude-guard/config.json`:
-
-```json
-{
-  "slack": {
-    "webhookUrl": "https://hooks.slack.com/services/...",
-    "channelId": "C1234567890"
-  },
-  "supabase": {
-    "url": "https://xxxx.supabase.co",
-    "anonKey": "eyJhbGciOiJIUzI1NiIs..."
-  },
-  "rules": {
-    "timeoutSeconds": 300,
-    "defaultAction": "deny",
-    "customPatterns": [
-      {
-        "pattern": "my-custom-cmd",
-        "severity": "high",
-        "reason": "Custom dangerous command"
-      }
-    ],
-    "whitelist": [
-      "npm run deploy"
-    ]
-  }
-}
-```
-
-### Options
-
-- `timeoutSeconds`: How long to wait for approval (default: 300)
-- `defaultAction`: What to do on timeout - `allow` or `deny` (default: deny)
-- `customPatterns`: Additional patterns to detect as dangerous
-- `whitelist`: Commands to always allow (regex patterns)
+- **Node.js** 18 or higher
+- **Slack** workspace with permission to create apps
+- **Supabase** account (free tier works)
 
 ## Development
 
