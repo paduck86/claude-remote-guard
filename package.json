@@ -6,8 +6,8 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "guard": "./dist/bin/cli.js",
-    "claude-guard-hook": "./dist/bin/hook.js"
+    "claude-remote-guard": "dist/bin/cli.js",
+    "claude-guard-hook": "dist/bin/hook.js"
   },
   "scripts": {
     "build": "tsc",
@@ -28,8 +28,16 @@
     "approval",
     "security"
   ],
-  "author": "",
+  "author": "paduck86",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paduck86/claude-remote-guard.git"
+  },
+  "homepage": "https://github.com/paduck86/claude-remote-guard#readme",
+  "bugs": {
+    "url": "https://github.com/paduck86/claude-remote-guard/issues"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
     "chalk": "^5.3.0",

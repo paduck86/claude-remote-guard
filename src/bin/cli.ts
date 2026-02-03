@@ -14,7 +14,8 @@ import {
 import { registerHook, unregisterHook, isHookRegistered } from '../lib/claude-settings.js';
 import { sendTestNotification } from '../lib/slack.js';
 import { testConnection as testSupabaseConnection, shutdownSupabase } from '../lib/supabase.js';
-import { createEdgeFunctionFiles } from '../lib/edge-function.js';
+import { createEdgeFunctionFiles, getEdgeFunctionEnvVars, getEdgeFunctionName } from '../lib/edge-function.js';
+import type { MessengerType } from '../lib/messenger/types.js';
 import { printSupabaseSetupInstructions } from '../lib/setup-instructions.js';
 
 const program = new Command();
@@ -46,24 +47,144 @@ program
       }
     }
 
-    const answers = await inquirer.prompt([
+    // Step 1: Select messenger type
+    const { messengerType } = await inquirer.prompt([
       {
-        type: 'input',
-        name: 'webhookUrl',
-        message: 'Slack Webhook URL:',
-        validate: (input: string) => {
-          if (!input.startsWith('https://hooks.slack.com/')) {
-            return 'Please enter a valid Slack webhook URL';
-          }
-          return true;
+        type: 'list',
+        name: 'messengerType',
+        message: 'Select notification messenger:',
+        choices: [
+          { name: 'Slack', value: 'slack' },
+          { name: 'Telegram', value: 'telegram' },
+          { name: 'WhatsApp (Twilio)', value: 'whatsapp' },
+        ],
+        default: 'slack',
+      },
+    ]);
+
+    // Step 2: Messenger-specific configuration
+    let messengerConfig: Config['messenger'];
+
+    if (messengerType === 'slack') {
+      const slackAnswers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'webhookUrl',
+          message: 'Slack Webhook URL:',
+          validate: (input: string) => {
+            if (!input.startsWith('https://hooks.slack.com/')) {
+              return 'Please enter a valid Slack webhook URL';
+            }
+            return true;
+          },
         },
-      },
-      {
-        type: 'input',
-        name: 'channelId',
-        message: 'Slack Channel ID (optional):',
-        default: '',
-      },
+        {
+          type: 'input',
+          name: 'channelId',
+          message: 'Slack Channel ID (optional):',
+          default: '',
+        },
+      ]);
+      messengerConfig = {
+        type: 'slack',
+        slack: {
+          webhookUrl: slackAnswers.webhookUrl,
+          channelId: slackAnswers.channelId || undefined,
+        },
+      };
+    } else if (messengerType === 'telegram') {
+      const telegramAnswers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'botToken',
+          message: 'Telegram Bot Token:',
+          validate: (input: string) => {
+            if (!input || input.length < 10) {
+              return 'Please enter a valid Telegram Bot Token';
+            }
+            return true;
+          },
+        },
+        {
+          type: 'input',
+          name: 'chatId',
+          message: 'Telegram Chat ID:',
+          validate: (input: string) => {
+            if (!input || input.length === 0) {
+              return 'Please enter a valid Chat ID';
+            }
+            return true;
+          },
+        },
+      ]);
+      messengerConfig = {
+        type: 'telegram',
+        telegram: {
+          botToken: telegramAnswers.botToken,
+          chatId: telegramAnswers.chatId,
+        },
+      };
+    } else {
+      // WhatsApp (Twilio)
+      const whatsappAnswers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'accountSid',
+          message: 'Twilio Account SID:',
+          validate: (input: string) => {
+            if (!input || !input.startsWith('AC')) {
+              return 'Please enter a valid Twilio Account SID (starts with AC)';
+            }
+            return true;
+          },
+        },
+        {
+          type: 'input',
+          name: 'authToken',
+          message: 'Twilio Auth Token:',
+          validate: (input: string) => {
+            if (!input || input.length < 20) {
+              return 'Please enter a valid Twilio Auth Token';
+            }
+            return true;
+          },
+        },
+        {
+          type: 'input',
+          name: 'fromNumber',
+          message: 'WhatsApp From Number (e.g., whatsapp:+14155238886):',
+          validate: (input: string) => {
+            if (!input.startsWith('whatsapp:+')) {
+              return 'Please enter a valid WhatsApp number (format: whatsapp:+1234567890)';
+            }
+            return true;
+          },
+        },
+        {
+          type: 'input',
+          name: 'toNumber',
+          message: 'WhatsApp To Number (e.g., whatsapp:+1234567890):',
+          validate: (input: string) => {
+            if (!input.startsWith('whatsapp:+')) {
+              return 'Please enter a valid WhatsApp number (format: whatsapp:+1234567890)';
+            }
+            return true;
+          },
+        },
+      ]);
+      messengerConfig = {
+        type: 'whatsapp',
+        whatsapp: {
+          accountSid: whatsappAnswers.accountSid,
+          authToken: whatsappAnswers.authToken,
+          fromNumber: whatsappAnswers.fromNumber,
+          toNumber: whatsappAnswers.toNumber,
+        },
+      };
+    }
+
+    // Step 3: Common configuration (Supabase and Rules)
+    const answers = await inquirer.prompt([
       {
         type: 'input',
         name: 'supabaseUrl',
@@ -111,10 +232,7 @@ program
     ]);
 
     const config: Config = {
-      slack: {
-        webhookUrl: answers.webhookUrl,
-        channelId: answers.channelId || undefined,
-      },
+      messenger: messengerConfig,
       supabase: {
         url: answers.supabaseUrl,
         anonKey: answers.supabaseAnonKey,
@@ -161,19 +279,41 @@ program
     ]);
 
     if (setupEdgeFunction) {
-      const result = createEdgeFunctionFiles(process.cwd());
+      const result = createEdgeFunctionFiles(process.cwd(), messengerType as MessengerType);
       if (result.success) {
+        const funcName = getEdgeFunctionName(messengerType as MessengerType);
+        const envVars = getEdgeFunctionEnvVars(messengerType as MessengerType);
+
         console.log(chalk.green(`\n✓ Edge Function files created at ./${result.path}/`));
         console.log(chalk.blue('\nNext steps:'));
         console.log(chalk.gray('  1. supabase login'));
         console.log(chalk.gray('  2. supabase link --project-ref <your-project-ref>'));
-        console.log(chalk.gray('  3. Set SLACK_SIGNING_SECRET:'));
-        console.log(chalk.cyan('     supabase secrets set SLACK_SIGNING_SECRET=<your-slack-signing-secret>'));
-        console.log(chalk.gray('  4. supabase functions deploy slack-callback'));
-        console.log(chalk.gray('  5. Set Slack Interactivity URL to:'));
-        console.log(chalk.cyan('     https://<project-ref>.supabase.co/functions/v1/slack-callback'));
-        console.log(chalk.yellow('\n⚠️  Important: Get your Slack Signing Secret from:'));
-        console.log(chalk.gray('   Slack App Settings > Basic Information > App Credentials > Signing Secret'));
+        console.log(chalk.gray(`  3. Set environment variable(s):`));
+        for (const envVar of envVars) {
+          console.log(chalk.cyan(`     supabase secrets set ${envVar}=<your-${envVar.toLowerCase().replace(/_/g, '-')}>`));
+        }
+        console.log(chalk.gray(`  4. supabase functions deploy ${funcName}`));
+        console.log(chalk.gray(`  5. Set webhook URL to:`));
+        console.log(chalk.cyan(`     https://<project-ref>.supabase.co/functions/v1/${funcName}`));
+
+        // Messenger-specific setup instructions
+        if (messengerType === 'slack') {
+          console.log(chalk.yellow('\n⚠️  Slack Setup:'));
+          console.log(chalk.gray('   Get your Signing Secret from:'));
+          console.log(chalk.gray('   Slack App Settings > Basic Information > App Credentials > Signing Secret'));
+          console.log(chalk.gray('   Set Interactivity URL in: Slack App Settings > Interactivity & Shortcuts'));
+        } else if (messengerType === 'telegram') {
+          console.log(chalk.yellow('\n⚠️  Telegram Setup:'));
+          console.log(chalk.gray('   1. Generate a random secret (e.g., openssl rand -hex 32)'));
+          console.log(chalk.gray('   2. Set webhook with secret_token:'));
+          console.log(chalk.cyan('   curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \\'));
+          console.log(chalk.cyan('     -d "url=https://<project-ref>.supabase.co/functions/v1/telegram-callback" \\'));
+          console.log(chalk.cyan('     -d "secret_token=<YOUR_WEBHOOK_SECRET>"'));
+        } else if (messengerType === 'whatsapp') {
+          console.log(chalk.yellow('\n⚠️  WhatsApp (Twilio) Setup:'));
+          console.log(chalk.gray('   Set webhook URL in: Twilio Console > Messaging > Settings > WhatsApp Sandbox'));
+          console.log(chalk.gray('   When a message comes in: https://<project-ref>.supabase.co/functions/v1/whatsapp-callback'));
+        }
       } else {
         console.log(chalk.red(`\n✗ Failed to create Edge Function files: ${result.error}`));
       }
@@ -223,7 +363,7 @@ program
 
 program
   .command('test')
-  .description('Send a test notification to Slack')
+  .description('Send a test notification')
   .action(async () => {
     const config = loadConfig();
     if (!config) {
@@ -231,13 +371,24 @@ program
       return;
     }
 
-    console.log(chalk.blue('Sending test notification to Slack...'));
+    const messengerType = config.messenger.type;
+    console.log(chalk.blue(`Sending test notification via ${messengerType}...`));
 
-    const result = await sendTestNotification(config.slack.webhookUrl);
-    if (result.ok) {
-      console.log(chalk.green('✓ Test notification sent successfully!'));
+    if (messengerType === 'slack' && config.messenger.slack) {
+      const result = await sendTestNotification(config.messenger.slack.webhookUrl);
+      if (result.ok) {
+        console.log(chalk.green('✓ Test notification sent successfully!'));
+      } else {
+        console.log(chalk.red(`✗ Failed to send notification: ${result.error}`));
+      }
+    } else if (messengerType === 'telegram') {
+      // TODO: Implement Telegram test notification
+      console.log(chalk.yellow('⚠ Telegram test notification not yet implemented'));
+    } else if (messengerType === 'whatsapp') {
+      // TODO: Implement WhatsApp test notification
+      console.log(chalk.yellow('⚠ WhatsApp test notification not yet implemented'));
     } else {
-      console.log(chalk.red(`✗ Failed to send notification: ${result.error}`));
+      console.log(chalk.red('✗ Unknown messenger type or missing configuration'));
     }
   });
 
@@ -273,13 +424,23 @@ program
 async function runTests(config: Config): Promise<void> {
   console.log(chalk.blue('\nTesting connections...\n'));
 
-  // Test Slack
-  console.log(chalk.gray('Testing Slack webhook...'));
-  const slackResult = await sendTestNotification(config.slack.webhookUrl);
-  if (slackResult.ok) {
-    console.log(chalk.green('✓ Slack webhook OK'));
-  } else {
-    console.log(chalk.red(`✗ Slack webhook failed: ${slackResult.error}`));
+  // Test messenger based on type
+  const messengerType = config.messenger.type;
+  console.log(chalk.gray(`Testing ${messengerType} connection...`));
+
+  if (messengerType === 'slack' && config.messenger.slack) {
+    const slackResult = await sendTestNotification(config.messenger.slack.webhookUrl);
+    if (slackResult.ok) {
+      console.log(chalk.green('✓ Slack webhook OK'));
+    } else {
+      console.log(chalk.red(`✗ Slack webhook failed: ${slackResult.error}`));
+    }
+  } else if (messengerType === 'telegram') {
+    // TODO: Implement Telegram test
+    console.log(chalk.yellow('⚠ Telegram connection test not yet implemented'));
+  } else if (messengerType === 'whatsapp') {
+    // TODO: Implement WhatsApp test
+    console.log(chalk.yellow('⚠ WhatsApp connection test not yet implemented'));
   }
 
   // Test Supabase

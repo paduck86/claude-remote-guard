@@ -3,7 +3,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { loadConfig } from '../lib/config.js';
 import { analyzeCommand } from '../lib/rules.js';
-import { sendSlackNotification } from '../lib/slack.js';
+import { MessengerFactory } from '../lib/messenger/factory.js';
 import {
   initializeSupabase,
   createRequest,
@@ -112,8 +112,10 @@ async function main(): Promise<void> {
         cwd,
       });
 
-      // Send Slack notification
-      const slackResult = await sendSlackNotification(config.slack.webhookUrl, {
+      // Send notification via configured messenger
+      const messenger = MessengerFactory.create(config.messenger);
+      const messengerLabel = MessengerFactory.getMessengerTypeLabel(config.messenger.type);
+      const notificationResult = await messenger.sendNotification({
         requestId,
         command,
         reason: analysis.reason,
@@ -122,12 +124,12 @@ async function main(): Promise<void> {
         timestamp: Date.now(),
       });
 
-      if (!slackResult.ok) {
+      if (!notificationResult.ok) {
         // Failed to send notification, use default action
         const decision = config.rules.defaultAction === 'allow' ? 'allow' : 'deny';
         output({
           decision,
-          reason: `Failed to send notification: ${slackResult.error}`,
+          reason: `Failed to send notification: ${notificationResult.error}`,
         });
         await shutdownSupabase();
         return;
@@ -145,9 +147,9 @@ async function main(): Promise<void> {
       await shutdownSupabase();
 
       if (status === 'approved') {
-        output({ decision: 'allow', reason: 'Approved via Slack' });
+        output({ decision: 'allow', reason: `Approved via ${messengerLabel}` });
       } else if (status === 'rejected') {
-        output({ decision: 'deny', reason: 'Rejected via Slack' });
+        output({ decision: 'deny', reason: `Rejected via ${messengerLabel}` });
       } else {
         // Timeout - use default action
         const decision = config.rules.defaultAction === 'allow' ? 'allow' : 'deny';

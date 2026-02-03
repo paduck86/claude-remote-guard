@@ -24,16 +24,16 @@ Claude Code에서 위험한 명령어 실행 시 Slack, Telegram, WhatsApp으로
 npm install -g claude-remote-guard
 
 # 2. 초기화 (대화형 설정)
-guard init
+claude-remote-guard init
 ```
 
-`guard init`을 실행하면 다음을 안내받습니다:
+`claude-remote-guard init`을 실행하면 다음을 안내받습니다:
 1. 메신저 선택 (Slack / Telegram / WhatsApp)
 2. 선택한 메신저의 인증 정보 입력
 3. Supabase 연결 정보 입력
 4. SQL 스키마 및 Edge Function 생성
 
-**중요**: 아래 가이드를 먼저 읽고 필요한 정보를 준비한 후 `guard init`을 실행하세요.
+**중요**: 아래 가이드를 먼저 읽고 필요한 정보를 준비한 후 `claude-remote-guard init`을 실행하세요.
 
 ---
 
@@ -179,7 +179,7 @@ https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://<project-ref
 
 #### 3단계: SQL 스키마 실행
 
-`guard init` 실행 후 출력된 SQL을 복사하여:
+`claude-remote-guard init` 실행 후 출력된 SQL을 복사하여:
 
 1. Supabase Dashboard에서 **SQL Editor** 클릭
 2. **New Query** 클릭
@@ -239,7 +239,7 @@ supabase link --project-ref <your-project-ref>
 
 #### 3단계: Edge Function 배포
 
-`guard init` 실행 시 `~/.claude-guard/supabase/functions/` 디렉토리에 Edge Function이 생성됩니다.
+`claude-remote-guard init` 실행 시 `~/.claude-guard/supabase/functions/` 디렉토리에 Edge Function이 생성됩니다.
 
 ```bash
 # Slack 사용 시
@@ -266,7 +266,7 @@ https://<project-ref>.supabase.co/functions/v1/<function-name>
 #### 연결 상태 확인
 
 ```bash
-guard status
+claude-remote-guard status
 ```
 
 출력 예시:
@@ -281,7 +281,7 @@ Hook:      installed ✓
 #### 테스트 알림 전송
 
 ```bash
-guard test
+claude-remote-guard test
 ```
 
 선택한 메신저로 테스트 알림이 전송됩니다. 버튼(Slack/Telegram) 또는 답장(WhatsApp)으로 승인/거부를 테스트하세요.
@@ -296,10 +296,10 @@ guard test
 
 | 명령어 | 설명 |
 |--------|------|
-| `guard init` | 초기 설정 (대화형) |
-| `guard status` | 연결 상태 확인 |
-| `guard test` | 테스트 알림 전송 |
-| `guard uninstall` | Claude Guard 제거 |
+| `claude-remote-guard init` | 초기 설정 (대화형) |
+| `claude-remote-guard status` | 연결 상태 확인 |
+| `claude-remote-guard test` | 테스트 알림 전송 |
+| `claude-remote-guard uninstall` | Claude Guard 제거 |
 
 ### 동작 방식
 
@@ -412,7 +412,7 @@ Claude Code ──▶ Hook ──▶ 메신저 알림
 
 ```bash
 # 설정 상태 확인
-guard status
+claude-remote-guard status
 
 # Edge Function 로그 확인
 supabase functions logs <function-name> --project-ref <project-ref>
