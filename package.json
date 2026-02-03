@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "bin": {
     "claude-remote-guard": "dist/bin/cli.js",
-    "claude-guard-hook": "dist/bin/hook.js"
+    "claude-remote-guard-hook": "dist/bin/hook.js"
   },
   "scripts": {
     "build": "tsc",

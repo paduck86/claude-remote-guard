@@ -4,27 +4,35 @@ import * as os from 'node:os';
 
 const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
-interface ClaudeHook {
+interface ClaudeHookCommand {
   type: 'command';
   command: string;
-  matcher?: string;
   timeout?: number;
+}
+
+interface ClaudeHookEntry {
+  matcher: { tools: string[] };
+  hooks: ClaudeHookCommand[];
 }
 
 interface ClaudeSettings {
   hooks?: {
-    PreToolUse?: ClaudeHook[];
-    PostToolUse?: ClaudeHook[];
-    [key: string]: ClaudeHook[] | undefined;
+    PreToolUse?: ClaudeHookEntry[];
+    PostToolUse?: ClaudeHookEntry[];
+    [key: string]: ClaudeHookEntry[] | undefined;
   };
   [key: string]: unknown;
 }
 
-const GUARD_HOOK: ClaudeHook = {
-  type: 'command',
-  command: 'claude-guard-hook',
-  matcher: 'Bash',
-  timeout: 310000, // 310 seconds (slightly more than the default 300s approval timeout)
+const GUARD_HOOK: ClaudeHookEntry = {
+  matcher: { tools: ['Bash'] },
+  hooks: [
+    {
+      type: 'command',
+      command: 'claude-remote-guard-hook',
+      timeout: 310000, // 310 seconds (slightly more than the default 300s approval timeout)
+    },
+  ],
 };
 
 function readClaudeSettings(): ClaudeSettings {
@@ -52,8 +60,10 @@ function writeClaudeSettings(settings: ClaudeSettings): void {
   });
 }
 
-function isGuardHook(hook: ClaudeHook): boolean {
-  return hook.command === 'claude-guard-hook' || hook.command.includes('claude-guard-hook');
+function isGuardHook(entry: ClaudeHookEntry): boolean {
+  return entry.hooks.some(
+    (h) => h.command === 'claude-remote-guard-hook' || h.command.includes('claude-remote-guard-hook')
+  );
 }
 
 export function isHookRegistered(): boolean {
