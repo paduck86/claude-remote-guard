@@ -92,13 +92,27 @@ program
           return true;
         },
       },
+    ]);
+
+    // Access Token 발급 안내
+    console.log(chalk.blue('\n💡 Access Token 발급 방법 (자동 배포를 원하면):'));
+    console.log(chalk.gray('   1. https://supabase.com/dashboard 접속'));
+    console.log(chalk.gray('   2. 좌측 하단 프로필 클릭 → Account Settings'));
+    console.log(chalk.gray('   3. Access Tokens 탭 → Generate new token'));
+    console.log(chalk.gray('   4. 생성된 토큰 복사 (sbp_로 시작)'));
+    console.log(chalk.gray('\n   ⏭️  건너뛰면 수동 배포 안내가 표시됩니다.\n'));
+
+    const { accessToken } = await inquirer.prompt([
       {
         type: 'password',
         name: 'accessToken',
-        message: 'Service Role Key (자동 배포용, 건너뛰려면 Enter):',
+        message: 'Access Token (자동 배포용, 건너뛰려면 Enter):',
         mask: '*',
       },
     ]);
+
+    // accessToken을 supabaseAnswers에 병합
+    supabaseAnswers.accessToken = accessToken;
 
     // Supabase 연결 테스트
     console.log(chalk.gray('  Supabase 연결 확인 중...'));
