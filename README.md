@@ -21,7 +21,7 @@ Claude Code에서 위험한 명령어 실행 시 Slack, Telegram, WhatsApp으로
 
 ```bash
 # 1. 설치
-npm install -g claude-remote-guard
+npm install -g claude-remote-guard@latest
 
 # 2. 초기화 (대화형 설정)
 claude-remote-guard init
