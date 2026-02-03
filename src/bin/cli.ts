@@ -6,17 +6,35 @@ import inquirer from 'inquirer';
 import {
   loadConfig,
   saveConfig,
-  getConfigPath,
   configExists,
   deleteConfig,
   type Config,
 } from '../lib/config.js';
 import { registerHook, unregisterHook, isHookRegistered } from '../lib/claude-settings.js';
-import { sendTestNotification } from '../lib/slack.js';
 import { testConnection as testSupabaseConnection, shutdownSupabase } from '../lib/supabase.js';
-import { createEdgeFunctionFiles, getEdgeFunctionEnvVars, getEdgeFunctionName } from '../lib/edge-function.js';
+import {
+  createEdgeFunctionFiles,
+  getEdgeFunctionEnvVars,
+  getEdgeFunctionName,
+  getEdgeFunctionSource,
+} from '../lib/edge-function.js';
 import type { MessengerType } from '../lib/messenger/types.js';
-import { printSupabaseSetupInstructions } from '../lib/setup-instructions.js';
+import { printSupabaseSetupInstructions, getSetupSQL } from '../lib/setup-instructions.js';
+import {
+  deployEdgeFunction,
+  setEdgeFunctionSecrets,
+  extractProjectRef,
+  validateAccessToken,
+} from '../lib/deployment/supabase-deploy.js';
+import { executeSetupSQL } from '../lib/deployment/db-setup.js';
+import {
+  setTelegramWebhook,
+  generateWebhookSecret,
+} from '../lib/deployment/telegram-webhook.js';
+import { MessengerFactory } from '../lib/messenger/factory.js';
+import { TelegramMessenger } from '../lib/messenger/telegram.js';
+import { WhatsAppMessenger } from '../lib/messenger/whatsapp.js';
+import { SlackMessenger } from '../lib/messenger/slack.js';
 
 const program = new Command();
 
@@ -47,115 +65,293 @@ program
       }
     }
 
-    // Step 1: Select messenger type
+    // ━━━ Step 1/3: Supabase 설정 ━━━
+    console.log(chalk.cyan('\n━━━ Step 1/3: Supabase 설정 ━━━'));
+
+    const supabaseAnswers = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'supabaseUrl',
+        message: 'Project URL:',
+        validate: (input: string) => {
+          if (!input.startsWith('https://') || !input.includes('.supabase.co')) {
+            return 'https://xxx.supabase.co 형식으로 입력해주세요';
+          }
+          return true;
+        },
+      },
+      {
+        type: 'password',
+        name: 'supabaseAnonKey',
+        message: 'Anon Key:',
+        mask: '*',
+        validate: (input: string) => {
+          if (!input || input.length < 20) {
+            return 'Supabase Anon Key를 입력해주세요';
+          }
+          return true;
+        },
+      },
+      {
+        type: 'password',
+        name: 'accessToken',
+        message: 'Access Token (자동 배포, 건너뛰려면 Enter):',
+        mask: '*',
+      },
+    ]);
+
+    // Supabase 연결 테스트
+    console.log(chalk.gray('  Supabase 연결 확인 중...'));
+    const tempConfig: Config = {
+      messenger: { type: 'slack' }, // 임시
+      supabase: {
+        url: supabaseAnswers.supabaseUrl,
+        anonKey: supabaseAnswers.supabaseAnonKey,
+      },
+      rules: { timeoutSeconds: 300, defaultAction: 'deny' },
+    };
+    const sbResult = await testSupabaseConnection(tempConfig);
+    if (!sbResult.ok) {
+      console.log(chalk.red(`✗ Supabase 연결 실패: ${sbResult.error}`));
+      console.log(chalk.yellow('설정을 확인 후 다시 시도해주세요.'));
+      await shutdownSupabase();
+      return;
+    }
+    console.log(chalk.green('✓ Supabase 연결 확인됨'));
+    await shutdownSupabase();
+
+    // SQL 테이블 생성 방법 선택
+    console.log(chalk.yellow('\n📋 데이터베이스 테이블 생성이 필요합니다.'));
+
+    const { tableSetupMethod } = await inquirer.prompt([
+      {
+        type: 'list',
+        name: 'tableSetupMethod',
+        message: '테이블 생성 방법:',
+        choices: [
+          { name: 'CLI가 직접 실행 (Database Password 필요)', value: 'auto' },
+          { name: '직접 SQL Editor에서 실행', value: 'manual' },
+        ],
+        default: 'auto',
+      },
+    ]);
+
+    if (tableSetupMethod === 'auto') {
+      // CLI가 직접 SQL 실행
+      const { databasePassword } = await inquirer.prompt([
+        {
+          type: 'password',
+          name: 'databasePassword',
+          message: 'Database Password:',
+          mask: '*',
+          validate: (input: string) => {
+            if (!input || input.length < 1) {
+              return 'Database Password를 입력해주세요 (Supabase Dashboard > Settings > Database)';
+            }
+            return true;
+          },
+        },
+      ]);
+
+      console.log(chalk.gray('  테이블 생성 중...'));
+      const dbResult = await executeSetupSQL(
+        supabaseAnswers.supabaseUrl,
+        databasePassword,
+        supabaseAnswers.accessToken || undefined
+      );
+
+      if (!dbResult.ok) {
+        console.log(chalk.red(`✗ 테이블 생성 실패: ${dbResult.error}`));
+
+        // 수동 방법으로 폴백
+        const { retryManual } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'retryManual',
+            message: '직접 SQL Editor에서 실행하시겠습니까?',
+            default: true,
+          },
+        ]);
+
+        if (retryManual) {
+          const manualSuccess = await promptManualSqlSetup();
+          if (!manualSuccess) return;
+        } else {
+          console.log(chalk.yellow('\n설정을 확인 후 다시 init을 실행해주세요.'));
+          return;
+        }
+      } else {
+        console.log(chalk.green('✓ 테이블 생성 완료'));
+      }
+    } else {
+      // 사용자가 직접 SQL 실행
+      const manualSuccess = await promptManualSqlSetup();
+      if (!manualSuccess) return;
+    }
+
+    // Access Token 검증 (입력한 경우)
+    let validAccessToken: string | null = null;
+    if (supabaseAnswers.accessToken && supabaseAnswers.accessToken.startsWith('sbp_')) {
+      console.log(chalk.gray('  Access Token 검증 중...'));
+      const isValid = await validateAccessToken(supabaseAnswers.accessToken);
+      if (isValid) {
+        validAccessToken = supabaseAnswers.accessToken;
+        console.log(chalk.green('✓ Access Token 유효'));
+      } else {
+        console.log(chalk.yellow('⚠ Access Token이 유효하지 않습니다. 수동 배포로 진행합니다.'));
+      }
+    }
+
+    // ━━━ Step 2/3: 메신저 설정 ━━━
+    console.log(chalk.cyan('\n━━━ Step 2/3: 메신저 설정 ━━━'));
+
     const { messengerType } = await inquirer.prompt([
       {
         type: 'list',
         name: 'messengerType',
-        message: 'Select notification messenger:',
+        message: '메신저 선택:',
         choices: [
+          { name: 'Telegram (권장)', value: 'telegram' },
           { name: 'Slack', value: 'slack' },
-          { name: 'Telegram', value: 'telegram' },
           { name: 'WhatsApp (Twilio)', value: 'whatsapp' },
         ],
-        default: 'slack',
+        default: 'telegram',
       },
     ]);
 
-    // Step 2: Messenger-specific configuration
     let messengerConfig: Config['messenger'];
 
-    if (messengerType === 'slack') {
-      const slackAnswers = await inquirer.prompt([
+    if (messengerType === 'telegram') {
+      // Telegram: Bot Token 입력 후 즉시 검증
+      const { botToken } = await inquirer.prompt([
         {
-          type: 'input',
-          name: 'webhookUrl',
-          message: 'Slack Webhook URL:',
-          validate: (input: string) => {
-            if (!input.startsWith('https://hooks.slack.com/')) {
-              return 'Please enter a valid Slack webhook URL';
-            }
-            return true;
-          },
-        },
-        {
-          type: 'input',
-          name: 'channelId',
-          message: 'Slack Channel ID (optional):',
-          default: '',
-        },
-      ]);
-      messengerConfig = {
-        type: 'slack',
-        slack: {
-          webhookUrl: slackAnswers.webhookUrl,
-          channelId: slackAnswers.channelId || undefined,
-        },
-      };
-    } else if (messengerType === 'telegram') {
-      const telegramAnswers = await inquirer.prompt([
-        {
-          type: 'input',
+          type: 'password',
           name: 'botToken',
-          message: 'Telegram Bot Token:',
+          message: 'Bot Token:',
+          mask: '*',
           validate: (input: string) => {
             if (!input || input.length < 10) {
-              return 'Please enter a valid Telegram Bot Token';
+              return 'Telegram Bot Token을 입력해주세요 (@BotFather에서 생성)';
             }
             return true;
           },
         },
+      ]);
+
+      // Bot Token 검증
+      console.log(chalk.gray('  Bot Token 검증 중...'));
+      const telegramMessenger = new TelegramMessenger({ botToken, chatId: '' });
+      const botResult = await telegramMessenger.testConnection();
+      if (!botResult.ok) {
+        console.log(chalk.red(`✗ Bot Token 검증 실패: ${botResult.error}`));
+        console.log(chalk.yellow('설정을 확인 후 다시 시도해주세요.'));
+        return;
+      }
+      console.log(chalk.green(`✓ Bot 확인됨: ${botResult.info?.botUsername}`));
+
+      const { chatId } = await inquirer.prompt([
         {
           type: 'input',
           name: 'chatId',
-          message: 'Telegram Chat ID:',
+          message: 'Chat ID:',
           validate: (input: string) => {
             if (!input || input.length === 0) {
-              return 'Please enter a valid Chat ID';
+              return 'Chat ID를 입력해주세요';
             }
             return true;
           },
         },
       ]);
+
       messengerConfig = {
         type: 'telegram',
-        telegram: {
-          botToken: telegramAnswers.botToken,
-          chatId: telegramAnswers.chatId,
+        telegram: { botToken, chatId },
+      };
+    } else if (messengerType === 'slack') {
+      const { webhookUrl } = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'webhookUrl',
+          message: 'Webhook URL:',
+          validate: (input: string) => {
+            if (!input.startsWith('https://hooks.slack.com/')) {
+              return 'https://hooks.slack.com/으로 시작하는 URL을 입력해주세요';
+            }
+            return true;
+          },
         },
+      ]);
+
+      // Slack Webhook 검증
+      console.log(chalk.gray('  Slack Webhook 검증 중...'));
+      const slackMessenger = new SlackMessenger({ webhookUrl });
+      const slackResult = await slackMessenger.testConnection();
+      if (!slackResult.ok) {
+        console.log(chalk.red(`✗ Slack Webhook 검증 실패: ${slackResult.error}`));
+        console.log(chalk.yellow('설정을 확인 후 다시 시도해주세요.'));
+        return;
+      }
+      console.log(chalk.green('✓ Slack Webhook 확인됨'));
+
+      messengerConfig = {
+        type: 'slack',
+        slack: { webhookUrl },
       };
     } else {
       // WhatsApp (Twilio)
-      const whatsappAnswers = await inquirer.prompt([
+      const { accountSid } = await inquirer.prompt([
         {
           type: 'input',
           name: 'accountSid',
           message: 'Twilio Account SID:',
           validate: (input: string) => {
             if (!input || !input.startsWith('AC')) {
-              return 'Please enter a valid Twilio Account SID (starts with AC)';
+              return 'AC로 시작하는 Account SID를 입력해주세요';
             }
             return true;
           },
         },
+      ]);
+
+      const { authToken } = await inquirer.prompt([
         {
-          type: 'input',
+          type: 'password',
           name: 'authToken',
           message: 'Twilio Auth Token:',
+          mask: '*',
           validate: (input: string) => {
             if (!input || input.length < 20) {
-              return 'Please enter a valid Twilio Auth Token';
+              return 'Twilio Auth Token을 입력해주세요';
             }
             return true;
           },
         },
+      ]);
+
+      // Twilio 계정 검증
+      console.log(chalk.gray('  Twilio 계정 검증 중...'));
+      const tempWhatsApp = new WhatsAppMessenger({
+        accountSid,
+        authToken,
+        fromNumber: 'whatsapp:+1',
+        toNumber: 'whatsapp:+1',
+      });
+      const twilioResult = await tempWhatsApp.testConnection();
+      if (!twilioResult.ok) {
+        console.log(chalk.red(`✗ Twilio 계정 검증 실패: ${twilioResult.error}`));
+        console.log(chalk.yellow('설정을 확인 후 다시 시도해주세요.'));
+        return;
+      }
+      console.log(chalk.green(`✓ Twilio 계정 확인됨: ${twilioResult.info?.accountName}`));
+
+      const whatsappNumbers = await inquirer.prompt([
         {
           type: 'input',
           name: 'fromNumber',
-          message: 'WhatsApp From Number (e.g., whatsapp:+14155238886):',
+          message: 'From Number (e.g., whatsapp:+14155238886):',
           validate: (input: string) => {
             if (!input.startsWith('whatsapp:+')) {
-              return 'Please enter a valid WhatsApp number (format: whatsapp:+1234567890)';
+              return 'whatsapp:+로 시작하는 번호를 입력해주세요';
             }
             return true;
           },
@@ -163,164 +359,61 @@ program
         {
           type: 'input',
           name: 'toNumber',
-          message: 'WhatsApp To Number (e.g., whatsapp:+1234567890):',
+          message: 'To Number (e.g., whatsapp:+1234567890):',
           validate: (input: string) => {
             if (!input.startsWith('whatsapp:+')) {
-              return 'Please enter a valid WhatsApp number (format: whatsapp:+1234567890)';
+              return 'whatsapp:+로 시작하는 번호를 입력해주세요';
             }
             return true;
           },
         },
       ]);
+
       messengerConfig = {
         type: 'whatsapp',
         whatsapp: {
-          accountSid: whatsappAnswers.accountSid,
-          authToken: whatsappAnswers.authToken,
-          fromNumber: whatsappAnswers.fromNumber,
-          toNumber: whatsappAnswers.toNumber,
+          accountSid,
+          authToken,
+          fromNumber: whatsappNumbers.fromNumber,
+          toNumber: whatsappNumbers.toNumber,
         },
       };
     }
 
-    // Step 3: Common configuration (Supabase and Rules)
-    const answers = await inquirer.prompt([
-      {
-        type: 'input',
-        name: 'supabaseUrl',
-        message: 'Supabase Project URL (https://xxx.supabase.co):',
-        validate: (input: string) => {
-          if (!input.startsWith('https://') || !input.includes('.supabase.co')) {
-            return 'Please enter a valid Supabase URL (https://xxx.supabase.co)';
-          }
-          return true;
-        },
-      },
-      {
-        type: 'input',
-        name: 'supabaseAnonKey',
-        message: 'Supabase Anon Key:',
-        validate: (input: string) => {
-          if (!input || input.length < 20) {
-            return 'Please enter a valid Supabase Anon Key';
-          }
-          return true;
-        },
-      },
-      {
-        type: 'number',
-        name: 'timeoutSeconds',
-        message: 'Approval timeout (seconds):',
-        default: 300,
-        validate: (input: number) => {
-          if (input < 10 || input > 3600) {
-            return 'Timeout must be between 10 and 3600 seconds';
-          }
-          return true;
-        },
-      },
-      {
-        type: 'list',
-        name: 'defaultAction',
-        message: 'Default action on timeout:',
-        choices: [
-          { name: 'Deny (safer)', value: 'deny' },
-          { name: 'Allow', value: 'allow' },
-        ],
-        default: 'deny',
-      },
-    ]);
-
+    // Config 저장
     const config: Config = {
       messenger: messengerConfig,
       supabase: {
-        url: answers.supabaseUrl,
-        anonKey: answers.supabaseAnonKey,
+        url: supabaseAnswers.supabaseUrl,
+        anonKey: supabaseAnswers.supabaseAnonKey,
       },
       rules: {
-        timeoutSeconds: answers.timeoutSeconds,
-        defaultAction: answers.defaultAction,
+        timeoutSeconds: 300, // 기본값
+        defaultAction: 'deny', // 기본값 - 보안상 'deny' 권장
+        // TODO (Phase 1.5): 사용자가 'allow'를 선택할 경우 경고 메시지 출력 필요
+        // - 경고: "⚠️ 'allow'로 설정하면 타임아웃 시 위험한 명령이 자동 실행됩니다!"
+        // - 확인: "정말 'allow'로 설정하시겠습니까?" 프롬프트 추가
       },
     };
-
     saveConfig(config);
-    console.log(chalk.green(`\n✓ Configuration saved to ${getConfigPath()}`));
 
-    // Register hook
+    // ━━━ Step 3/3: 배포 및 설정 ━━━
+    console.log(chalk.cyan('\n━━━ Step 3/3: 배포 및 설정 ━━━'));
+
+    // Edge Function 배포
+    if (validAccessToken) {
+      await autoDeployEdgeFunction(config, messengerType as MessengerType, validAccessToken);
+    } else {
+      await manualEdgeFunctionSetup(messengerType as MessengerType);
+    }
+
+    // Hook 등록
     const hookResult = registerHook();
     if (hookResult.success) {
       console.log(chalk.green(`✓ ${hookResult.message}`));
     } else {
       console.log(chalk.red(`✗ ${hookResult.message}`));
     }
-
-    // Test connections
-    const { testNow } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'testNow',
-        message: 'Test connections now?',
-        default: true,
-      },
-    ]);
-
-    if (testNow) {
-      await runTests(config);
-    }
-
-    // Edge Function setup prompt
-    const { setupEdgeFunction } = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'setupEdgeFunction',
-        message: 'Do you want to set up Supabase Edge Function?',
-        default: true,
-      },
-    ]);
-
-    if (setupEdgeFunction) {
-      const result = createEdgeFunctionFiles(process.cwd(), messengerType as MessengerType);
-      if (result.success) {
-        const funcName = getEdgeFunctionName(messengerType as MessengerType);
-        const envVars = getEdgeFunctionEnvVars(messengerType as MessengerType);
-
-        console.log(chalk.green(`\n✓ Edge Function files created at ./${result.path}/`));
-        console.log(chalk.blue('\nNext steps:'));
-        console.log(chalk.gray('  1. supabase login'));
-        console.log(chalk.gray('  2. supabase link --project-ref <your-project-ref>'));
-        console.log(chalk.gray(`  3. Set environment variable(s):`));
-        for (const envVar of envVars) {
-          console.log(chalk.cyan(`     supabase secrets set ${envVar}=<your-${envVar.toLowerCase().replace(/_/g, '-')}>`));
-        }
-        console.log(chalk.gray(`  4. supabase functions deploy ${funcName}`));
-        console.log(chalk.gray(`  5. Set webhook URL to:`));
-        console.log(chalk.cyan(`     https://<project-ref>.supabase.co/functions/v1/${funcName}`));
-
-        // Messenger-specific setup instructions
-        if (messengerType === 'slack') {
-          console.log(chalk.yellow('\n⚠️  Slack Setup:'));
-          console.log(chalk.gray('   Get your Signing Secret from:'));
-          console.log(chalk.gray('   Slack App Settings > Basic Information > App Credentials > Signing Secret'));
-          console.log(chalk.gray('   Set Interactivity URL in: Slack App Settings > Interactivity & Shortcuts'));
-        } else if (messengerType === 'telegram') {
-          console.log(chalk.yellow('\n⚠️  Telegram Setup:'));
-          console.log(chalk.gray('   1. Generate a random secret (e.g., openssl rand -hex 32)'));
-          console.log(chalk.gray('   2. Set webhook with secret_token:'));
-          console.log(chalk.cyan('   curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \\'));
-          console.log(chalk.cyan('     -d "url=https://<project-ref>.supabase.co/functions/v1/telegram-callback" \\'));
-          console.log(chalk.cyan('     -d "secret_token=<YOUR_WEBHOOK_SECRET>"'));
-        } else if (messengerType === 'whatsapp') {
-          console.log(chalk.yellow('\n⚠️  WhatsApp (Twilio) Setup:'));
-          console.log(chalk.gray('   Set webhook URL in: Twilio Console > Messaging > Settings > WhatsApp Sandbox'));
-          console.log(chalk.gray('   When a message comes in: https://<project-ref>.supabase.co/functions/v1/whatsapp-callback'));
-        }
-      } else {
-        console.log(chalk.red(`\n✗ Failed to create Edge Function files: ${result.error}`));
-      }
-    }
-
-    // Always show SQL setup instructions
-    printSupabaseSetupInstructions();
 
     console.log(chalk.green('\n🎉 Setup complete! Claude Guard is now active.\n'));
   });
@@ -371,24 +464,21 @@ program
       return;
     }
 
-    const messengerType = config.messenger.type;
-    console.log(chalk.blue(`Sending test notification via ${messengerType}...`));
+    try {
+      const messenger = MessengerFactory.create(config.messenger);
+      const messengerLabel = MessengerFactory.getMessengerTypeLabel(config.messenger.type);
 
-    if (messengerType === 'slack' && config.messenger.slack) {
-      const result = await sendTestNotification(config.messenger.slack.webhookUrl);
+      console.log(chalk.blue(`Sending test notification via ${messengerLabel}...`));
+
+      const result = await messenger.sendTestNotification();
       if (result.ok) {
         console.log(chalk.green('✓ Test notification sent successfully!'));
       } else {
         console.log(chalk.red(`✗ Failed to send notification: ${result.error}`));
       }
-    } else if (messengerType === 'telegram') {
-      // TODO: Implement Telegram test notification
-      console.log(chalk.yellow('⚠ Telegram test notification not yet implemented'));
-    } else if (messengerType === 'whatsapp') {
-      // TODO: Implement WhatsApp test notification
-      console.log(chalk.yellow('⚠ WhatsApp test notification not yet implemented'));
-    } else {
-      console.log(chalk.red('✗ Unknown messenger type or missing configuration'));
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.log(chalk.red(`✗ Failed: ${errorMessage}`));
     }
   });
 
@@ -421,38 +511,203 @@ program
     console.log(chalk.blue('\nClaude Guard has been uninstalled.\n'));
   });
 
-async function runTests(config: Config): Promise<void> {
-  console.log(chalk.blue('\nTesting connections...\n'));
+program
+  .command('show-sql')
+  .description('Show SQL script for Supabase database setup')
+  .option('--copy', 'Copy SQL to clipboard')
+  .action(async (options: { copy?: boolean }) => {
+    const sql = getSetupSQL();
 
-  // Test messenger based on type
-  const messengerType = config.messenger.type;
-  console.log(chalk.gray(`Testing ${messengerType} connection...`));
-
-  if (messengerType === 'slack' && config.messenger.slack) {
-    const slackResult = await sendTestNotification(config.messenger.slack.webhookUrl);
-    if (slackResult.ok) {
-      console.log(chalk.green('✓ Slack webhook OK'));
+    if (options.copy) {
+      try {
+        // clipboardy 동적 import (ESM)
+        const { default: clipboard } = await import('clipboardy');
+        await clipboard.write(sql);
+        console.log(chalk.green('✓ SQL이 클립보드에 복사되었습니다.'));
+        console.log(chalk.gray('Supabase Dashboard → SQL Editor에서 붙여넣기하세요.'));
+      } catch {
+        console.log(chalk.yellow('⚠ 클립보드 복사 실패. 아래 SQL을 직접 복사하세요.'));
+        printSupabaseSetupInstructions();
+      }
     } else {
-      console.log(chalk.red(`✗ Slack webhook failed: ${slackResult.error}`));
+      printSupabaseSetupInstructions();
+      console.log(chalk.gray('Tip: --copy 옵션으로 클립보드에 복사할 수 있습니다.'));
     }
-  } else if (messengerType === 'telegram') {
-    // TODO: Implement Telegram test
-    console.log(chalk.yellow('⚠ Telegram connection test not yet implemented'));
-  } else if (messengerType === 'whatsapp') {
-    // TODO: Implement WhatsApp test
-    console.log(chalk.yellow('⚠ WhatsApp connection test not yet implemented'));
+  });
+
+async function autoDeployEdgeFunction(config: Config, messengerType: MessengerType, accessToken: string): Promise<void> {
+  const projectRef = extractProjectRef(config.supabase.url);
+  if (!projectRef) {
+    console.log(chalk.red('✗ Supabase URL에서 project ref를 추출할 수 없습니다.'));
+    console.log(chalk.yellow('수동 배포로 전환합니다.'));
+    await manualEdgeFunctionSetup(messengerType);
+    return;
   }
 
-  // Test Supabase
-  console.log(chalk.gray('Testing Supabase connection...'));
-  const sbResult = await testSupabaseConnection(config);
-  if (sbResult.ok) {
-    console.log(chalk.green('✓ Supabase connection OK'));
+  const funcName = getEdgeFunctionName(messengerType);
+  const sourceCode = getEdgeFunctionSource(messengerType);
+
+  // Edge Function 배포
+  console.log(chalk.gray(`  Edge Function 배포 중... (${funcName})`));
+  const deployResult = await deployEdgeFunction(projectRef, accessToken, funcName, sourceCode);
+
+  if (!deployResult.success) {
+    console.log(chalk.red(`\n✗ Edge Function 배포 실패: ${deployResult.error}`));
+    console.log(chalk.yellow('수동 배포로 전환합니다.'));
+    await manualEdgeFunctionSetup(messengerType);
+    return;
+  }
+  console.log(chalk.green(`✓ Edge Function 배포 완료: ${deployResult.url}`));
+
+  // Secrets 설정
+  const secrets = await collectSecretsForMessenger(config, messengerType);
+  if (Object.keys(secrets).length > 0) {
+    console.log(chalk.gray('  Secrets 설정 중...'));
+    const secretsResult = await setEdgeFunctionSecrets(projectRef, accessToken, secrets);
+
+    if (!secretsResult.success) {
+      console.log(chalk.yellow(`⚠ Secrets 설정 실패: ${secretsResult.error}`));
+      console.log(chalk.gray('  수동으로 설정해주세요:'));
+      for (const [key] of Object.entries(secrets)) {
+        console.log(chalk.cyan(`    supabase secrets set ${key}=<value>`));
+      }
+    } else {
+      console.log(chalk.green('✓ Secrets 설정 완료'));
+    }
+  }
+
+  // Telegram인 경우 Webhook 설정
+  if (messengerType === 'telegram' && config.messenger.telegram) {
+    await setupTelegramWebhook(config.messenger.telegram.botToken, deployResult.url!, secrets['TELEGRAM_WEBHOOK_SECRET']);
+  }
+}
+
+async function collectSecretsForMessenger(
+  config: Config,
+  messengerType: MessengerType
+): Promise<Record<string, string>> {
+  const secrets: Record<string, string> = {};
+
+  if (messengerType === 'slack') {
+    const { signingSecret } = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'signingSecret',
+        message: 'Slack Signing Secret:',
+        mask: '*',
+        validate: (input: string) => {
+          if (!input || input.length < 10) {
+            return 'Slack Signing Secret을 입력해주세요. (Slack App > Basic Information > Signing Secret)';
+          }
+          return true;
+        },
+      },
+    ]);
+    secrets['SLACK_SIGNING_SECRET'] = signingSecret;
+  } else if (messengerType === 'telegram' && config.messenger.telegram) {
+    secrets['TELEGRAM_BOT_TOKEN'] = config.messenger.telegram.botToken;
+
+    // Webhook Secret 항상 자동 생성
+    // 보안: Secret 값을 로그에 출력하지 않음 (Phase 1.4)
+    secrets['TELEGRAM_WEBHOOK_SECRET'] = generateWebhookSecret();
+    console.log(chalk.gray('  Webhook Secret 자동 생성됨'));
+  } else if (messengerType === 'whatsapp' && config.messenger.whatsapp) {
+    secrets['TWILIO_AUTH_TOKEN'] = config.messenger.whatsapp.authToken;
+  }
+
+  return secrets;
+}
+
+async function setupTelegramWebhook(botToken: string, webhookUrl: string, webhookSecret: string): Promise<void> {
+  console.log(chalk.gray('  Telegram Webhook 설정 중...'));
+
+  const result = await setTelegramWebhook(botToken, webhookUrl, webhookSecret);
+
+  if (!result.ok) {
+    console.log(chalk.yellow(`⚠ Telegram Webhook 설정 실패: ${result.description}`));
+    console.log(chalk.gray('  수동으로 설정해주세요:'));
+    console.log(chalk.cyan(`  curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \\`));
+    console.log(chalk.cyan(`    -d "url=${webhookUrl}" \\`));
+    console.log(chalk.cyan(`    -d "secret_token=<YOUR_WEBHOOK_SECRET>"`));
   } else {
-    console.log(chalk.red(`✗ Supabase connection failed: ${sbResult.error}`));
+    console.log(chalk.green('✓ Telegram Webhook 설정 완료'));
+  }
+}
+
+async function manualEdgeFunctionSetup(messengerType: MessengerType): Promise<void> {
+  const result = createEdgeFunctionFiles(process.cwd(), messengerType);
+  if (result.success) {
+    const funcName = getEdgeFunctionName(messengerType);
+    const envVars = getEdgeFunctionEnvVars(messengerType);
+
+    console.log(chalk.green(`\n✓ Edge Function 파일 생성됨: ./${result.path}/`));
+    console.log(chalk.blue('\n다음 단계를 수동으로 진행해주세요:'));
+    console.log(chalk.gray('  1. supabase login'));
+    console.log(chalk.gray('  2. supabase link --project-ref <your-project-ref>'));
+    console.log(chalk.gray(`  3. 환경 변수 설정:`));
+    for (const envVar of envVars) {
+      console.log(
+        chalk.cyan(`     supabase secrets set ${envVar}=<your-${envVar.toLowerCase().replace(/_/g, '-')}>`)
+      );
+    }
+    console.log(chalk.gray(`  4. supabase functions deploy ${funcName}`));
+    console.log(chalk.gray(`  5. Webhook URL 설정:`));
+    console.log(chalk.cyan(`     https://<project-ref>.supabase.co/functions/v1/${funcName}`));
+
+    // 메신저별 추가 안내
+    if (messengerType === 'slack') {
+      console.log(chalk.yellow('\n⚠️  Slack 설정:'));
+      console.log(chalk.gray('   Signing Secret 위치:'));
+      console.log(chalk.gray('   Slack App Settings > Basic Information > App Credentials > Signing Secret'));
+      console.log(chalk.gray('   Interactivity URL 설정: Slack App Settings > Interactivity & Shortcuts'));
+    } else if (messengerType === 'telegram') {
+      console.log(chalk.yellow('\n⚠️  Telegram 설정:'));
+      console.log(chalk.gray('   1. 랜덤 시크릿 생성 (예: openssl rand -hex 32)'));
+      console.log(chalk.gray('   2. Webhook 설정:'));
+      console.log(chalk.cyan('   curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook" \\'));
+      console.log(chalk.cyan('     -d "url=https://<project-ref>.supabase.co/functions/v1/telegram-callback" \\'));
+      console.log(chalk.cyan('     -d "secret_token=<YOUR_WEBHOOK_SECRET>"'));
+    } else if (messengerType === 'whatsapp') {
+      console.log(chalk.yellow('\n⚠️  WhatsApp (Twilio) 설정:'));
+      console.log(chalk.gray('   Webhook URL 설정: Twilio Console > Messaging > Settings > WhatsApp Sandbox'));
+      console.log(
+        chalk.gray('   When a message comes in: https://<project-ref>.supabase.co/functions/v1/whatsapp-callback')
+      );
+    }
+  } else {
+    console.log(chalk.red(`\n✗ Edge Function 파일 생성 실패: ${result.error}`));
+  }
+}
+
+/**
+ * 사용자가 직접 SQL을 실행하도록 안내하고 확인받는 함수
+ */
+async function promptManualSqlSetup(): Promise<boolean> {
+  try {
+    const { default: clipboard } = await import('clipboardy');
+    await clipboard.write(getSetupSQL());
+    console.log(chalk.green('   SQL이 클립보드에 복사되었습니다.'));
+  } catch {
+    console.log(chalk.gray('   SQL 확인: claude-remote-guard show-sql --copy'));
+  }
+  console.log(chalk.gray('   Supabase Dashboard → SQL Editor에서 실행하세요.'));
+
+  const { sqlExecuted } = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'sqlExecuted',
+      message: 'SQL을 실행했습니까?',
+      default: false,
+    },
+  ]);
+
+  if (!sqlExecuted) {
+    console.log(chalk.yellow('\nSQL 실행 후 다시 init을 실행해주세요.'));
+    console.log(chalk.gray('SQL 복사: claude-remote-guard show-sql --copy'));
+    return false;
   }
 
-  await shutdownSupabase();
+  return true;
 }
 
 program.parse();

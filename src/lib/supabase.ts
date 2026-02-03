@@ -35,12 +35,17 @@ export interface ApprovalRequest {
 
 let supabaseClient: SupabaseClient | null = null;
 
-export function initializeSupabase(config: Config): SupabaseClient {
+export function initializeSupabase(config: Config, machineId?: string): SupabaseClient {
   if (supabaseClient) {
     return supabaseClient;
   }
 
-  supabaseClient = createClient(config.supabase.url, config.supabase.anonKey);
+  // machineId가 있으면 x-machine-id 헤더 추가 (RLS 정책에서 사용)
+  const options = machineId
+    ? { global: { headers: { 'x-machine-id': machineId } } }
+    : undefined;
+
+  supabaseClient = createClient(config.supabase.url, config.supabase.anonKey, options);
   return supabaseClient;
 }
 
@@ -53,7 +58,7 @@ export function getSupabaseClient(): SupabaseClient {
 
 export async function createRequest(
   requestId: string,
-  request: { command: string; dangerReason: string; severity: Severity; cwd: string }
+  request: { command: string; dangerReason: string; severity: Severity; cwd: string; machineId?: string }
 ): Promise<void> {
   const client = getSupabaseClient();
 
@@ -67,6 +72,7 @@ export async function createRequest(
     severity: request.severity,
     cwd: request.cwd,
     status: 'pending',
+    machine_id: request.machineId,
   });
 
   if (error) {

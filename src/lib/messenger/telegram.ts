@@ -1,9 +1,15 @@
-import type { Messenger, MessengerMessage, MessengerResult } from './types.js';
+import type { Messenger, MessengerMessage, MessengerResult, ConnectionTestResult } from './types.js';
 import { maskSensitiveInfo, truncateCommand, getSeverityEmoji } from './base.js';
 
 export interface TelegramConfig {
   botToken: string;
   chatId: string;
+}
+
+// Bot Token을 마스킹하여 에러 메시지에서 노출 방지
+function maskBotToken(text: string): string {
+  // bot123456789:ABCdefGHI... 형식의 토큰을 마스킹
+  return text.replace(/bot[0-9]+:[A-Za-z0-9_-]+/gi, 'bot[REDACTED]');
 }
 
 // Telegram MarkdownV2에서 이스케이프가 필요한 문자
@@ -95,13 +101,13 @@ export class TelegramMessenger implements Messenger {
       const result = await response.json() as { ok: boolean; description?: string };
 
       if (!result.ok) {
-        return { ok: false, error: `Telegram API error: ${result.description || 'Unknown error'}` };
+        return { ok: false, error: maskBotToken(`Telegram API error: ${result.description || 'Unknown error'}`) };
       }
 
       return { ok: true };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return { ok: false, error: errorMessage };
+      return { ok: false, error: maskBotToken(errorMessage) };
     }
   }
 
@@ -131,13 +137,47 @@ export class TelegramMessenger implements Messenger {
       const result = await response.json() as { ok: boolean; description?: string };
 
       if (!result.ok) {
-        return { ok: false, error: `Telegram API error: ${result.description || 'Unknown error'}` };
+        return { ok: false, error: maskBotToken(`Telegram API error: ${result.description || 'Unknown error'}`) };
       }
 
       return { ok: true };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      return { ok: false, error: errorMessage };
+      return { ok: false, error: maskBotToken(errorMessage) };
+    }
+  }
+
+  // getMe API로 Bot Token 검증 및 Bot 정보 조회
+  async testConnection(): Promise<ConnectionTestResult> {
+    try {
+      const response = await fetch(`${this.baseUrl}/getMe`, {
+        method: 'GET',
+      });
+
+      const result = await response.json() as {
+        ok: boolean;
+        description?: string;
+        result?: {
+          id: number;
+          is_bot: boolean;
+          first_name: string;
+          username?: string;
+        };
+      };
+
+      if (!result.ok) {
+        return { ok: false, error: maskBotToken(`Telegram API error: ${result.description || 'Invalid Bot Token'}`) };
+      }
+
+      return {
+        ok: true,
+        info: {
+          botUsername: result.result?.username ? `@${result.result.username}` : result.result?.first_name,
+        },
+      };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      return { ok: false, error: maskBotToken(errorMessage) };
     }
   }
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import { v4 as uuidv4 } from 'uuid';
 import { loadConfig } from '../lib/config.js';
 import { analyzeCommand } from '../lib/rules.js';
@@ -10,6 +12,15 @@ import {
   listenForApproval,
   shutdownSupabase,
 } from '../lib/supabase.js';
+
+/**
+ * 머신 고유 식별자 생성
+ * hostname + username 해시로 생성하여 동일 머신에서 일관된 ID 보장
+ */
+function getMachineId(): string {
+  const raw = `${os.hostname()}:${os.userInfo().username}`;
+  return crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
+}
 
 interface HookInput {
   tool_name: string;
@@ -101,15 +112,19 @@ async function main(): Promise<void> {
     const cwd = process.cwd();
 
     try {
-      // Initialize Supabase
-      initializeSupabase(config);
+      // Generate machine identifier for RLS
+      const machineId = getMachineId();
 
-      // Create request in Supabase
+      // Initialize Supabase with machine_id header
+      initializeSupabase(config, machineId);
+
+      // Create request in Supabase with machine identifier
       await createRequest(requestId, {
         command,
         dangerReason: analysis.reason,
         severity: analysis.severity,
         cwd,
+        machineId,
       });
 
       // Send notification via configured messenger

@@ -21,6 +21,43 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+// UUID v4 형식 검증
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isValidUUID(id: string): boolean {
+  return UUID_V4_REGEX.test(id);
+}
+
+// 타임스탬프 검증: 1시간(3600초) 이내 요청만 허용
+const MAX_REQUEST_AGE_SECONDS = 3600;
+function isRequestExpired(createdAt: string): boolean {
+  const createdTime = new Date(createdAt).getTime();
+  const now = Date.now();
+  return (now - createdTime) / 1000 > MAX_REQUEST_AGE_SECONDS;
+}
+
+// 인메모리 rate limiter (분당 30회 제한)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const windowMs = 60 * 1000; // 1분
+  const maxRequests = 30;
+
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + windowMs });
+    return true;
+  }
+
+  if (record.count >= maxRequests) {
+    return false; // Rate limit exceeded
+  }
+
+  record.count++;
+  return true;
+}
+
 // Verify Twilio request signature
 async function verifyTwilioSignature(
   authToken: string,
@@ -56,6 +93,15 @@ serve(async (req: Request) => {
   // Only allow POST
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
+  }
+
+  // Rate limiting 체크
+  const clientIP = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  if (!checkRateLimit(clientIP)) {
+    return new Response(JSON.stringify({ error: 'Too many requests' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
@@ -108,6 +154,12 @@ serve(async (req: Request) => {
     }
 
     const [, action, requestId] = match;
+
+    // UUID 형식 검증
+    if (!isValidUUID(requestId)) {
+      return twimlResponse('Invalid request ID format.');
+    }
+
     const status = action.toUpperCase() === 'APPROVE' ? 'approved' : 'rejected';
 
     // Extract phone number for resolved_by
@@ -123,6 +175,26 @@ serve(async (req: Request) => {
     }
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // 타임스탬프 검증: 요청의 created_at 조회
+    const { data: requestData, error: fetchError } = await supabase
+      .from('approval_requests')
+      .select('id, created_at, status')
+      .eq('id', requestId)
+      .single();
+
+    if (fetchError || !requestData) {
+      return twimlResponse('Request not found.');
+    }
+
+    if (requestData.status !== 'pending') {
+      return twimlResponse('Request already resolved.');
+    }
+
+    // 1시간 이내 요청만 허용
+    if (isRequestExpired(requestData.created_at)) {
+      return twimlResponse('⏰ Request expired (over 1 hour old).');
+    }
 
     // Update the approval request
     const { data, error } = await supabase

@@ -1,4 +1,35 @@
+import safeRegex from 'safe-regex';
+
 export type Severity = 'low' | 'medium' | 'high' | 'critical';
+
+/** 최대 허용 패턴 길이 */
+const MAX_PATTERN_LENGTH = 200;
+
+/**
+ * ReDoS 공격을 방지하기 위해 사용자 정규식 패턴의 안전성을 검증합니다.
+ * @param pattern 사용자가 제공한 정규식 패턴 문자열
+ * @returns 안전한 경우 RegExp 객체, 안전하지 않으면 null
+ */
+function createSafeRegex(pattern: string): RegExp | null {
+  // 패턴 길이 제한
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    console.warn(`[rules] 정규식 패턴이 너무 깁니다 (${pattern.length} > ${MAX_PATTERN_LENGTH}): ${pattern.slice(0, 50)}...`);
+    return null;
+  }
+
+  // ReDoS 취약점 검사
+  if (!safeRegex(pattern)) {
+    console.warn(`[rules] 안전하지 않은 정규식 패턴이 감지되었습니다: ${pattern.slice(0, 50)}${pattern.length > 50 ? '...' : ''}`);
+    return null;
+  }
+
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    console.warn(`[rules] 유효하지 않은 정규식 패턴입니다: ${pattern.slice(0, 50)}${pattern.length > 50 ? '...' : ''}`);
+    return null;
+  }
+}
 
 export interface RuleResult {
   isDangerous: boolean;
@@ -108,13 +139,9 @@ export function analyzeCommand(
   // Check user whitelist
   if (whitelist) {
     for (const pattern of whitelist) {
-      try {
-        const regex = new RegExp(pattern, 'i');
-        if (regex.test(trimmedCommand)) {
-          return { isDangerous: false, severity: 'low', reason: 'Whitelisted command' };
-        }
-      } catch {
-        // Invalid regex, skip
+      const regex = createSafeRegex(pattern);
+      if (regex && regex.test(trimmedCommand)) {
+        return { isDangerous: false, severity: 'low', reason: 'Whitelisted command' };
       }
     }
   }

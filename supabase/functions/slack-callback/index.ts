@@ -27,6 +27,35 @@ interface SlackPayload {
   response_url: string;
 }
 
+// UUID v4 형식 검증
+const UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function isValidUUID(id: string): boolean {
+  return UUID_V4_REGEX.test(id);
+}
+
+// 인메모리 rate limiter (분당 30회 제한)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const windowMs = 60 * 1000; // 1분
+  const maxRequests = 30;
+
+  const record = rateLimitMap.get(ip);
+
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + windowMs });
+    return true;
+  }
+
+  if (record.count >= maxRequests) {
+    return false; // Rate limit exceeded
+  }
+
+  record.count++;
+  return true;
+}
+
 // HMAC-SHA256 signature verification for Slack requests
 async function verifySlackSignature(
   body: string,
@@ -64,6 +93,15 @@ serve(async (req: Request) => {
   // Only allow POST from Slack
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
+  }
+
+  // Rate limiting 체크
+  const clientIP = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown';
+  if (!checkRateLimit(clientIP)) {
+    return new Response(JSON.stringify({ error: 'Too many requests' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   try {
@@ -123,6 +161,13 @@ serve(async (req: Request) => {
     }
 
     const { action_id, value: requestId } = action;
+
+    // UUID 형식 검증
+    if (!isValidUUID(requestId)) {
+      console.error('Invalid request ID format:', requestId);
+      return new Response('Invalid request ID format', { status: 400 });
+    }
+
     const resolvedBy = payload.user.username || payload.user.name || payload.user.id;
 
     // Determine status based on action
