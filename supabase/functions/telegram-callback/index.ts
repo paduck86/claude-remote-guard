@@ -31,9 +31,7 @@ interface TelegramUser {
 
 interface TelegramMessage {
   message_id: number;
-  chat: {
-    id: number;
-  };
+  chat: { id: number };
 }
 
 interface CallbackQuery {
@@ -49,7 +47,6 @@ interface TelegramUpdate {
 }
 
 serve(async (req: Request) => {
-  // Only allow POST
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
   }
@@ -61,7 +58,7 @@ serve(async (req: Request) => {
       return new Response('Server configuration error', { status: 500 });
     }
 
-    // Verify webhook secret token (set via setWebhook API with secret_token parameter)
+    // Verify webhook secret token
     const webhookSecret = Deno.env.get('TELEGRAM_WEBHOOK_SECRET');
     if (!webhookSecret) {
       console.error('Missing TELEGRAM_WEBHOOK_SECRET environment variable');
@@ -75,47 +72,34 @@ serve(async (req: Request) => {
     }
 
     const update: TelegramUpdate = await req.json();
-
-    // Only handle callback queries (button presses)
     if (!update.callback_query) {
       return new Response('OK', { status: 200 });
     }
 
     const callbackQuery = update.callback_query;
     const callbackData = callbackQuery.data;
-
     if (!callbackData) {
       return new Response('No callback data', { status: 400 });
     }
 
-    // Parse callback data: "approve:requestId" or "reject:requestId"
     const [action, requestId] = callbackData.split(':');
-
-    if (!action || !requestId) {
+    if (!action || !requestId || (action !== 'approve' && action !== 'reject')) {
       return new Response('Invalid callback data format', { status: 400 });
-    }
-
-    if (action !== 'approve' && action !== 'reject') {
-      return new Response('Unknown action', { status: 400 });
     }
 
     const status = action === 'approve' ? 'approved' : 'rejected';
     const resolvedBy = callbackQuery.from.username ||
-                       `${callbackQuery.from.first_name}${callbackQuery.from.last_name ? ' ' + callbackQuery.from.last_name : ''}` ||
-                       String(callbackQuery.from.id);
+      `${callbackQuery.from.first_name}${callbackQuery.from.last_name ? ' ' + callbackQuery.from.last_name : ''}` ||
+      String(callbackQuery.from.id);
 
-    // Initialize Supabase client
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-
     if (!supabaseUrl || !supabaseServiceKey) {
       console.error('Missing Supabase environment variables');
       return new Response('Server configuration error', { status: 500 });
     }
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Update the approval request
     const { data, error } = await supabase
       .from('approval_requests')
       .update({
@@ -129,30 +113,21 @@ serve(async (req: Request) => {
 
     if (error) {
       console.error('Failed to update request:', error);
-      // Answer callback query with error
       await answerCallbackQuery(botToken, callbackQuery.id, '❌ Failed to update request');
       return new Response('Failed to update request', { status: 500 });
     }
 
-    // Check if request was found and updated
     if (!data || data.length === 0) {
       await answerCallbackQuery(botToken, callbackQuery.id, '⚠️ Request not found or already resolved');
       return new Response('OK', { status: 200 });
     }
 
-    // Answer callback query with success
     const emoji = status === 'approved' ? '✅' : '❌';
     const actionText = status === 'approved' ? 'Approved' : 'Rejected';
     await answerCallbackQuery(botToken, callbackQuery.id, `${emoji} ${actionText}`);
 
-    // Edit original message to remove buttons and show result
     if (callbackQuery.message) {
-      await editMessageReplyMarkup(
-        botToken,
-        callbackQuery.message.chat.id,
-        callbackQuery.message.message_id,
-        `\n\n${emoji} *${actionText}* by @${resolvedBy}`,
-      );
+      await editMessageReplyMarkup(botToken, callbackQuery.message.chat.id, callbackQuery.message.message_id, `\n\n${emoji} *${actionText}* by @${resolvedBy}`);
     }
 
     return new Response('OK', { status: 200 });
@@ -162,40 +137,20 @@ serve(async (req: Request) => {
   }
 });
 
-async function answerCallbackQuery(
-  botToken: string,
-  callbackQueryId: string,
-  text: string
-): Promise<void> {
+async function answerCallbackQuery(botToken: string, callbackQueryId: string, text: string): Promise<void> {
   await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      callback_query_id: callbackQueryId,
-      text,
-      show_alert: false,
-    }),
+    body: JSON.stringify({ callback_query_id: callbackQueryId, text, show_alert: false }),
   });
 }
 
-async function editMessageReplyMarkup(
-  botToken: string,
-  chatId: number,
-  messageId: number,
-  appendText: string
-): Promise<void> {
-  // Remove inline keyboard
+async function editMessageReplyMarkup(botToken: string, chatId: number, messageId: number, appendText: string): Promise<void> {
   await fetch(`https://api.telegram.org/bot${botToken}/editMessageReplyMarkup`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      message_id: messageId,
-      reply_markup: { inline_keyboard: [] },
-    }),
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [] } }),
   });
-
-  // Send follow-up message with result
   await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

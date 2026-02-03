@@ -21,7 +21,7 @@ import { printSupabaseSetupInstructions } from '../lib/setup-instructions.js';
 const program = new Command();
 
 program
-  .name('guard')
+  .name('claude-remote-guard')
   .description('Claude Guard - Remote approval system for Claude Code CLI')
   .version('1.0.0');
 
@@ -335,7 +335,7 @@ program
     const config = loadConfig();
     if (!config) {
       console.log(chalk.red('✗ Configuration not found or invalid'));
-      console.log(chalk.gray(`  Run ${chalk.cyan('guard init')} to set up`));
+      console.log(chalk.gray(`  Run ${chalk.cyan('claude-remote-guard init')} to set up`));
       return;
     }
     console.log(chalk.green('✓ Configuration loaded'));
@@ -345,7 +345,7 @@ program
       console.log(chalk.green('✓ Hook registered in Claude settings'));
     } else {
       console.log(chalk.yellow('⚠ Hook not registered'));
-      console.log(chalk.gray(`  Run ${chalk.cyan('guard init')} to register`));
+      console.log(chalk.gray(`  Run ${chalk.cyan('claude-remote-guard init')} to register`));
     }
 
     // Test Supabase
@@ -367,7 +367,7 @@ program
   .action(async () => {
     const config = loadConfig();
     if (!config) {
-      console.log(chalk.red('Configuration not found. Run guard init first.'));
+      console.log(chalk.red('Configuration not found. Run claude-remote-guard init first.'));
       return;
     }
 

@@ -47,7 +47,7 @@ export interface LegacyConfig {
   rules: RulesConfig;
 }
 
-const CONFIG_DIR = path.join(os.homedir(), '.claude-guard');
+const CONFIG_DIR = path.join(os.homedir(), '.claude-remote-guard');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 export function getConfigDir(): string {
