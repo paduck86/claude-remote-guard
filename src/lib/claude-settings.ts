@@ -61,27 +61,39 @@ function writeClaudeSettings(settings: ClaudeSettings): void {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isGuardCommand(command: string | undefined): boolean {
+  if (!command) return false;
+  return (
+    command === 'claude-remote-guard-hook' ||
+    command.includes('claude-remote-guard-hook') ||
+    command === 'claude-guard-hook' ||
+    command.includes('claude-guard-hook')
+  );
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isGuardHook(entry: any): boolean {
   // 신버전 포맷: entry.hooks 배열
   if (entry.hooks && Array.isArray(entry.hooks)) {
-    return entry.hooks.some(
-      (h: ClaudeHookCommand) =>
-        h.command === 'claude-remote-guard-hook' ||
-        h.command?.includes('claude-remote-guard-hook') ||
-        h.command === 'claude-guard-hook' ||
-        h.command?.includes('claude-guard-hook')
-    );
+    return entry.hooks.some((h: ClaudeHookCommand) => isGuardCommand(h.command));
   }
   // 구버전 포맷: entry.command 직접
   if (entry.command) {
-    return (
-      entry.command === 'claude-remote-guard-hook' ||
-      entry.command.includes('claude-remote-guard-hook') ||
-      entry.command === 'claude-guard-hook' ||
-      entry.command.includes('claude-guard-hook')
-    );
+    return isGuardCommand(entry.command);
   }
   return false;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function isNewFormatGuardHook(entry: any): boolean {
+  // 신버전 포맷인지 확인: matcher가 객체이고 hooks 배열이 있어야 함
+  return (
+    entry.matcher &&
+    typeof entry.matcher === 'object' &&
+    Array.isArray(entry.matcher.tools) &&
+    Array.isArray(entry.hooks) &&
+    entry.hooks.some((h: ClaudeHookCommand) => isGuardCommand(h.command))
+  );
 }
 
 export function isHookRegistered(): boolean {
@@ -106,16 +118,29 @@ export function registerHook(): { success: boolean; message: string } {
       settings.hooks.PreToolUse = [];
     }
 
-    // Check if already registered
-    if (settings.hooks.PreToolUse.some(isGuardHook)) {
+    // Check if already registered with new format
+    if (settings.hooks.PreToolUse.some(isNewFormatGuardHook)) {
       return { success: true, message: 'Hook is already registered' };
     }
 
-    // Add the hook
+    // Remove any legacy format hooks (구버전 형식 제거)
+    const hadLegacyHook = settings.hooks.PreToolUse.some(
+      (entry) => isGuardHook(entry) && !isNewFormatGuardHook(entry)
+    );
+    if (hadLegacyHook) {
+      settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(
+        (entry) => !isGuardHook(entry)
+      );
+    }
+
+    // Add the hook with new format
     settings.hooks.PreToolUse.push(GUARD_HOOK);
     writeClaudeSettings(settings);
 
-    return { success: true, message: 'Hook registered successfully' };
+    const message = hadLegacyHook
+      ? 'Hook migrated to new format successfully'
+      : 'Hook registered successfully';
+    return { success: true, message };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return { success: false, message: `Failed to register hook: ${errorMessage}` };
