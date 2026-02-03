@@ -63,11 +63,10 @@ CREATE POLICY "Allow insert pending requests" ON approval_requests
     length(machine_id) >= 16
   );
 
--- Policy: Allow select own pending requests only (machine_id 필수)
-CREATE POLICY "Allow select pending requests" ON approval_requests
+-- Policy: Allow select own requests (Realtime 수신을 위해 status 조건 제거)
+CREATE POLICY "Allow select own requests" ON approval_requests
   FOR SELECT
   USING (
-    status = 'pending' AND
     created_at > NOW() - INTERVAL '1 hour' AND
     machine_id IS NOT NULL AND
     machine_id = COALESCE(
