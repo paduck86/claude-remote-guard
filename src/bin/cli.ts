@@ -72,7 +72,7 @@ program
       {
         type: 'input',
         name: 'supabaseUrl',
-        message: 'Project URL:',
+        message: 'Supabase URL:',
         validate: (input: string) => {
           if (!input.startsWith('https://') || !input.includes('.supabase.co')) {
             return 'https://xxx.supabase.co 형식으로 입력해주세요';
@@ -95,7 +95,7 @@ program
       {
         type: 'password',
         name: 'accessToken',
-        message: 'Access Token (자동 배포, 건너뛰려면 Enter):',
+        message: 'Service Role Key (자동 배포용, 건너뛰려면 Enter):',
         mask: '*',
       },
     ]);
@@ -162,6 +162,19 @@ program
 
       if (!dbResult.ok) {
         console.log(chalk.red(`✗ 테이블 생성 실패: ${dbResult.error}`));
+
+        // SSL 인증서 에러 처리
+        if (
+          dbResult.error?.includes('self-signed certificate') ||
+          dbResult.error?.includes('SELF_SIGNED_CERT') ||
+          dbResult.error?.includes('unable to verify')
+        ) {
+          console.log(chalk.yellow('\n⚠️  SSL 인증서 에러 (회사 프록시/VPN 환경)'));
+          console.log(chalk.gray('  해결 방법:'));
+          console.log(chalk.gray('  1. VPN 끄고 재시도'));
+          console.log(chalk.gray('  2. 또는 환경변수 설정 후 재시도:'));
+          console.log(chalk.cyan('     NODE_TLS_REJECT_UNAUTHORIZED=0 npx claude-remote-guard init'));
+        }
 
         // 수동 방법으로 폴백
         const { retryManual } = await inquirer.prompt([
@@ -248,6 +261,14 @@ program
         return;
       }
       console.log(chalk.green(`✓ Bot 확인됨: ${botResult.info?.botUsername}`));
+
+      // Chat ID 확인 방법 안내
+      console.log(chalk.blue('\n💡 Chat ID 확인 방법:'));
+      console.log(chalk.gray('   1. Telegram에서 봇에게 아무 메시지 전송'));
+      console.log(chalk.gray('   2. 브라우저에서 열기:'));
+      console.log(chalk.cyan(`      https://api.telegram.org/bot${botToken}/getUpdates`));
+      console.log(chalk.gray('   3. 응답에서 "chat":{"id": 숫자} 부분이 Chat ID'));
+      console.log('');
 
       const { chatId } = await inquirer.prompt([
         {
